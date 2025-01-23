@@ -1,0 +1,1062 @@
+---
+title: "load database from jason/isaac communication analysis"
+author: "Eric Medina"
+date: "2023-07-05"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(survcomp)
+library(metap)
+library(ggrepel)
+library(ggbreak)
+library(data.table)
+library(conflicted)
+library(patchwork) #to combine plots
+library(ggrepel)
+library(ggpubr)
+library(enrichplot)
+library(rstatix)
+library(foreach)
+library(tidyverse)
+
+conflict_prefer_all("dplyr", quiet = T)
+
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "degs/"
+dir2 <- "receptorLigandAnalysis/"
+```
+
+```{r}
+setwd(paste0(dir, "counts/filtered/"))
+b.data <- fread(file = paste(prefix, cellSamples, "model_format_post",
+                                 "filtered_counts.txt", sep = "_"),
+            sep = "\t", header = T, quote = "")
+
+setwd(dir = paste0(dir, dir2))
+#list.files()
+load(file = "Filtered_Human-2015-Ramilowski-LR-pairs.RData")
+
+#Separate l/r column
+lr.pairs.tmp <- LRpairs %>% 
+  separate(Pair.Name, into = c("ligand", "receptor"), remove = F, sep = "_")
+
+#Separate l/r column
+#lr.pairs.tmp <- LRpairsFiltered %>% 
+  #separate(Pair.Name, into = c("ligand", "receptor"), remove = F, sep = "_")
+
+
+#Get Receptors and ligands
+keep <- c("ESR1", "FGFRL1", "IGF1R", "INSR", "EGFR", 
+  "ERBB3", "BMPR2", "PGR",
+  "FGFR3", "FGFR2", "TGFBR1")
+keep2 <- c("IGF2", "HRAS", "FGF12", "FGF13",
+        "SORBS1", "GNAI2", "CDH1",
+        "L1CAM", "NAMPT", "PGR", "TGFB3")
+
+tmp <- lr.pairs.tmp %>% 
+  filter(receptor %in% keep) %>% 
+  filter(ligand %in% keep2) %>% 
+  select(ligand, receptor)
+
+k2 <- tmp %>% filter(receptor == "EGFR") %>% select(ligand)
+k3 <- tmp %>% filter(receptor == "ERBB3") %>% select(ligand)
+k4 <- tmp %>% filter(receptor == "FGFR2") %>% select(ligand)
+k5 <- tmp %>% filter(receptor == "IGF1R") %>% select(ligand)
+k6 <- tmp %>% filter(receptor == "INSR") %>% select(ligand)
+k7 <- tmp %>% filter(receptor == "TGFBR1") %>% select(ligand)
+
+
+options(ggrepel.max.overlaps = Inf)
+x <- list(EGFR = k2$ligand, ERBB3 = k3$ligand, FGFR2 = k4$ligand, 
+          IGF1R = k5$ligand, INSR = k6$ligand, TGFBR1 = k7$ligand)
+p1.3 <- cnetplot(x,
+               cex.params = list(category_node = 0.9,
+                                category_label = 0.8,
+                                gene_node = 0.8,
+                               gene_label = 0.7))
+p1.3
+
+setwd(dir = paste0(dir, dir2, "figures/"))
+tiff(filename = paste0(batch, "integrated.model_ligand.Repeptor_pairs_",
+                       "ramilowski2015.tiff"),
+     width = 9, height = 6, units = "in", res = 300)
+p1.3
+dev.off()
+
+#GROWTH-FACTOR RECEPTOR GENE LEVEL ANALYSIS
+#Get all GF receptors differentially expressed in the cell line data
+
+
+#PRE-TREATMENT 
+
+setwd(dir = paste0(dir, dir1, "lmeModelResults/pre.Treatment"))
+#list.files()
+coef.genes_s.dmso <- fread(file = paste0("COH069_15929R_RNA_",
+                                         "everSamples_Genes_sen.DMSO_refs_",
+                                         "pre.Treatment_lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+
+#ERBB FAMILY RECEPTORS
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("EGFR", "ERBB2", "ERBB3", "ERBB4")
+erbb.receptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% #has FDR ≤ 0.05 only
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% keep)
+erbb.receptors
+#EGFR (enriched in resistant) AND ERBB3 (enriched in sensitive) are DEGs
+
+#Pull all ligand binding partners 
+l.egfr.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "EGFR")
+
+#filter ligands for FDR
+lr.egfr <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% #has FDR ≤ 0.05 only
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% l.egfr.sig$ligand)
+lr.egfr
+
+#Pull all ligand binding partners 
+l.erbb3.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "ERBB3")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.erbb3 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% l.erbb3.sig$ligand)
+lr.erbb3
+
+
+#ESTROGEN AND PROGESTERON RECEPTORS
+
+#Which are DEGs in resistant cells before treatment?
+keep <- c("ESR1", "ESR2", "PGR")
+hr.receptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% keep)
+hr.receptors
+#ESR1 (enriched in resistant) and PGR (enriched in sensitive) are DEGs
+
+#Pull all ligand binding partners 
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "ESR1")
+l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.esr1 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.esr1
+#No ligands in database for ESR1
+
+#Pull all ligand binding partners 
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "PGR")
+l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.pgr <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.pgr
+#No ligand pairs for ESR1 and PGR in database
+
+
+#INSR AND IGFR
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("IGF1R", "IGF2R", "INSR")
+ins.receptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% keep)
+ins.receptors
+#IGF1R (enriched in resistant) is a DEG
+
+#Pull all ligand binding partners
+l.igf1r.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "IGF1R")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.igf1r <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% l.igf1r.sig$ligand)
+lr.igf1r
+# IGF2, GNAI2 (enriched in resistant), CHD1 (enriched in sensitive) are DEGs
+
+
+
+#TGFBR FAMILY
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("BMPR1A", "BMPR1B", "BMPR2", "TGFBR1", "TGFBR2", "TGFBR3")
+tgfb.recptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% keep)
+tgfb.recptors
+#TGFBR2 (enriched in resistant) and TGFBR1 (enriched in sensitive) are DEGs
+
+#Pull all ligand binding partners
+l.tgfbr1.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "TGFBR1")
+#l.tgfbr1.sig$ligand
+
+lr.tgfbr1 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% l.tgfbr1.sig$ligand)
+lr.tgfbr1
+
+#Pull all ligand binding partners
+l.tgfbr2.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "TGFBR2")
+#l.tgfbr2.sig$ligand
+
+lr.tgfbr2 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% l.tgfbr2.sig$ligand)
+lr.tgfbr2
+
+
+#VEGF SIGNALING
+
+#None of the VEGFRs are DEGs (FLT1 or FLT4)
+#vegfb only found as DEGs
+keep <- c("FLT1", "KDR", "FLT4")
+vegfr.recptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% keep)
+vegfr.recptors
+#FLT1 enriched in resistant
+
+#Pull all ligand binding partners
+l.flt1.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "FLT1")
+#l.flt1.sig$ligand
+
+lr.flt1 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>% 
+  filter(Gene %in% l.flt1.sig$ligand)
+lr.flt1
+#PGF enriched in resistant and VEGFB enriched in sensitive
+
+
+
+#FGFR FAMILY
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("FGFR1", "FGFR2", "FGFR3", "FGFR4", "FGFRL1")
+fgfr.receptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% keep)
+fgfr.receptors
+#FGFR1 and FGFR3 (both enriched in sensitive) are statistically significant
+
+#Pull all ligand binding partners
+#l.tmp.sig <- lr.pairs.tmp %>% 
+l.fgfr2.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "FGFR2")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.fgfr2 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% l.fgfr2.sig$ligand)
+lr.fgfr2
+#L1CAM (enriched in sensitive), FGF13 and FGF12 (enriched in resistant) are DEGs
+
+#Pull all ligand binding partners
+l.fgfr3.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "FGFR3")
+
+#filter ligands for FDR
+lr.fgfr3 <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR") %>%
+  filter(Gene %in% l.fgfr3.sig$ligand)
+lr.fgfr3
+#FGF13 and FGF12 (both enriched in resistant) are DEGs
+
+
+
+#FLT3 FAMILY
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("FLT3")
+flt3.receptors <- coef.genes_s.dmso %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(Gene %in% keep) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "stateeverR")
+flt3.receptors
+#FLT3 filtered out of counts (low reads)
+
+
+#COMBINE ALL DATA FRAMES FOR RECEPTORS
+gfr.names <- c(erbb.receptors$Gene, 
+               hr.receptors$Gene,
+               ins.receptors$Gene, 
+               fgfr.receptors$Gene) %>% 
+  unique()
+
+all.GFRs.pre <- b.data %>% 
+  as.data.frame() %>% 
+  filter(Gene %in% gfr.names) %>% 
+  droplevels() %>% 
+  mutate(state = relevel(state, ref = "sen"))
+
+all.GFRs.pre$state <- relevel(all.GFRs.pre$state, ref = "sen")
+
+#Combine ALL LIGANDS
+all.ligand.names <- c(lr.egfr$Gene, lr.erbb3$Gene, lr.igf1r$Gene,
+                      lr.fgfr2$Gene, lr.fgfr3$Gene) %>% 
+  unique()
+
+all.GFRs.ligands.pre <- b.data %>% 
+  filter(Gene %in% all.ligand.names) %>% 
+    droplevels()
+
+#setwd(paste0(dir, "/ssgsea.gsva/lme_model_merge"))
+#write.table(all.GFRs.pre, file = "stateR_all_GFR_metaPheno_ligand.txt",
+#            sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+
+
+#POST-TREATMENT ANALYSIS
+
+#PRE-TREATMENT 
+
+setwd(dir = paste0(dir, dir1, "lmeModelResults/post.Treatment"))
+#list.files()
+coef.genes_r.ever <- fread(file = paste0("COH069_15929R_RNA_",
+                                         "everSamples_Genes_everR.ever_refs_",
+                                         "post.Treatment_lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+#ERBB FAMILY RECEPTORS
+
+#Which of these are DEGs in resistant cells after treatment?
+keep <- c("EGFR", "ERBB2", "ERBB3", "ERBB4")
+erbb.receptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>%
+  filter(Gene %in% keep)
+erbb.receptors
+#ERBB3 (enriched in sensitive) is a DEGs
+
+#Pull all ligand binding partners 
+lr.erbb3.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "ERBB3")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.erbb3 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% lr.erbb3.sig$ligand)
+lr.erbb3
+#L1CAM and CDH1 enriched in sensitive
+
+
+#ESTROGEN AND PROGESTERON RECEPTORS
+
+#Which are DEGs in resistant cells before treatment?
+keep <- c("ESR1", "ESR2", "PGR")
+hr.receptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>%
+  filter(Gene %in% keep)
+hr.receptors
+#ESR1 (enriched in resistant) and PGR (enriched in sensitive) are DEGs
+
+#Pull all ligand binding partners 
+lr.esr1.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "ESR1")
+
+#filter ligands for FDR
+lr.esr1 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% lr.esr1.sig$ligand)
+lr.esr1
+#No ligands in database for ESR1
+
+#Pull all ligand binding partners 
+lr.pgr.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "PGR")
+
+#filter ligands for FDR
+lr.pgr <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% lr.pgr.sig$ligand)
+lr.pgr
+#No ligand pairs for ESR1 and PGR in database
+
+
+#INSR AND IGFRs
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("IGF1R", "IGF2R", "INSR")
+ins.receptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% keep)
+ins.receptors
+#IGF1R, IGF2R and INSR (both enriched in resistant) are DEGs
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "IGF1R")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.igf1r <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.igf1r
+# IGF2, GNAI2 and CHD1 enriched in resitant 
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "IGF2R")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.igf2r <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.igf2r
+# IGF2 enriched in resistant 
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "INSR")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.insr <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.insr
+#HRAS, IGF2, and SORBS1 enriched in resistant, NAMPT enriched in sensitive
+
+
+#TGFBR FAMILY
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("BMPR1A", "BMPR1B", "BMPR2", "TGFBR1", "TGFBR2", "TGFBR3")
+tgfb.receptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% keep)
+tgfb.receptors
+#BMPR2 and TGFBR1 (enriched in sensitive) are DEGs
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "BMPR2")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.bmpr2 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>%  
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.bmpr2
+#No ligand pairs detected as DEGs
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "TGFBR1")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.tgfbr1 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.tgfbr1
+#TGFB3 (enriched in sensitive) is DEG
+
+
+#VEGF SIGNALING
+
+#None of the VEGFRs are DEGs (FLT1 or FLT4)
+#vegfb only found as DEGs
+#Looked at VEGF ligands to look for receptors they bind to, found vegfb/ret
+keep <- c("FLT1", "KDR", "FLT4")
+vegfr.recptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% keep)
+vegfr.recptors
+#No receptors found as DEGs
+
+
+#FGFR FAMILY
+
+#Which of these are DEGs in resistant cells before treatment?
+keep <- c("FGFR1", "FGFR2", "FGFR3", "FGFR4", "FGFRL1")
+fgfr.receptors <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% keep)
+fgfr.receptors
+#FGFR2 (enriched in sensitive) and FGFRL1 (enriched in resistant) are DEGs
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "FGFR2")
+#l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.fgfr2 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>% 
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.fgfr2
+#L1CAM (enriched in sensitive), FGF12 (enriched in resistant) are DEGs
+
+#Pull all ligand binding partners
+l.tmp.sig <- lr.pairs.tmp %>% 
+  filter(receptor == "FGFRL1")
+l.tmp.sig$ligand
+
+#filter ligands for FDR
+lr.fgfrl1 <- coef.genes_r.ever %>% 
+  mutate_at(vars(FDR), as.numeric) %>% 
+  filter(FDR <= 0.05,
+         coefficient == "statesen") %>%  
+  filter(Gene %in% l.tmp.sig$ligand)
+lr.fgfrl1
+#No ligands found as DEGs
+
+
+#COMBINE ALL DATA FRAMES FOR RECEPTORS
+gfr.names <- c(erbb.receptors$Gene, 
+               hr.receptors$Gene,
+               ins.receptors$Gene, 
+               tgfb.receptors$Gene,
+               fgfr.receptors$Gene) %>% 
+  unique()
+all.GFRs.post <- b.data %>% 
+  filter(Gene %in% gfr.names) %>% 
+  droplevels()
+
+all.GFRs.post$state <- relevel(all.GFRs.post$state, ref = "sen")
+
+#Combine ALL LIGANDS
+all.ligand.names <- c(lr.fgfr2$Gene, lr.tgfbr1$Gene, lr.insr$Gene,
+                      lr.igf1r$Gene, lr.erbb3$Gene) %>% 
+  unique()
+
+all.GFRs.ligands.post <- b.data %>% 
+  filter(Gene %in% all.ligand.names) %>% 
+    droplevels()
+
+#PLOTS FOR GROWTH FACTOR RECEPTORS AND LIGANDS FIGURE
+
+
+#setwd(paste0(dir, "/ssgsea.gsva/lme_model_merge"))
+#write.table(all.GFRs.post, file = "stateS_all_GFR_metaPheno_ligand.txt",
+#            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#COMBINE ALL GFR AND LIGANDS FOR LOG2CPM DATAFRAME
+all.gfr.and.ligands <- b.data %>% 
+  filter(Gene %in% c(unique(all.GFRs.pre$Gene, all.GFRs.ligands.post$Gene,
+                     all.GFRs.ligands.pre$Gene, all.GFRs.ligands.post$Gene)))
+
+all.gfr.names <- c(all.GFRs.pre$Gene, all.GFRs.post$Gene) %>% 
+  as.character() %>% 
+  unique()
+
+all.ligand.names <- c(all.GFRs.ligands.pre$Gene, 
+                      all.GFRs.ligands.post$Gene) %>% 
+   as.character() %>% 
+  unique()
+
+
+
+#Plot GF receptors
+
+rl <- "GFRs"
+mycomparisons <- list(c("sen_DMSO", "everR_DMSO"), c("sen_ever", "everR_ever"))
+
+rec <- c("ESR1", "IGF1R", "IGF2R", "INSR")
+
+tmp.r <- coef.genes_s.dmso %>% 
+  filter(Gene %in% rec,
+         coefficient == "stateeverR") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.e <- coef.genes_s.dmso %>% 
+  filter(Gene %in% rec,
+         coefficient == "treatmentever") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.s <- coef.genes_r.ever %>% 
+  filter(Gene %in% rec,
+         coefficient == "statesen") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.d <- coef.genes_r.ever %>% 
+  filter(Gene %in% rec,
+         coefficient == "treatmentDMSO") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp <- tmp.r %>% 
+  full_join(tmp.s, by = colnames(.)) %>% 
+  full_join(tmp.e, by = colnames(.)) %>% 
+  full_join(tmp.d, by = colnames(.))
+tmp
+
+b.data1 <- b.data %>% 
+  filter(Gene %in% rec) %>% 
+  mutate(S_T = ordered(S_T, levels = c("sen_DMSO", "everR_DMSO",
+                                       "sen_ever", "everR_ever"))) %>% 
+  mutate_at(vars(Gene, cellLine, cellLine2, C_S_T), factor)
+str(b.data1)
+
+stat.test <- foreach (i = rec, .combine = "rbind") %do% { 
+  
+  print(i)
+  
+  tmp1 <- tmp %>% 
+    filter(Gene == i)
+  
+  b.data1 %>%
+  filter(Gene == i) %>% 
+  group_by(Gene) %>% 
+  t_test(Expression.log2cpm ~ S_T) %>%
+  #filter(!groups %in% list(c("sen_ever", "everR_DMSO"), 
+  #                         c("sen_DMSO", "everR_ever"))) %>% 
+  add_xy_position(x = "S_T", scales = "free", step.increase = 0.2) %>% 
+  ungroup() %>% 
+  filter(groups %in% list(c("sen_DMSO", "everR_DMSO"), 
+                           c("sen_ever", "everR_ever"))) %>% 
+  mutate(comparison = #ifelse(group1 == "everR_DMSO" & group2 == "everR_ever",
+                      #       "R.DMSO.vs.R.ever",
+                      #ifelse(group1 == "everR_DMSO" & group2 == "sen_DMSO",
+                      #       "R.vs.S_DMSO",
+                      #ifelse(group1 == "everR_ever" & group2 == "sen_ever" ,
+                      #       "S.vs.R_ever",
+                      #ifelse(group1 == "sen_DMSO" & group2 == "sen_ever",
+                      #       "S.ever.vs.S.DMSO", 
+                      ifelse(group1 == "sen_DMSO" & group2 == "everR_DMSO",
+                             "R.vs.S_DMSO",
+                      ifelse(group1 == "sen_ever" & group2 == "everR_ever" ,
+                             "S.vs.R_ever", "error"#))))
+                      ))) %>% 
+  arrange(Gene, comparison) %>% 
+  group_by(Gene, comparison) %>% 
+  left_join(tmp1, by = join_by(Gene, comparison)) %>% 
+  ungroup() %>% 
+  #add_significance(p.col = "FDR") %>% 
+  add_significance(p.col = "p.value") %>% 
+  mutate(xmin = ifelse(group1 == "sen_DMSO", 3, 1),
+         xmax = ifelse(group1 == "sen_DMSO", 4, 2))
+    
+}
+
+stat.test1 <- stat.test %>% 
+  mutate(Gene = factor(Gene, levels = rec),
+         )
+
+#Plot
+p1 <- b.data1 %>% 
+  filter(Gene %in% c(rec)) %>% #GFRs
+  mutate(Gene = factor(Gene, levels = c(rec)),
+  #filter(Gene %in% c(ligs)) %>% #GFR ligands
+  #mutate(Gene = factor(Gene, levels = c(ligs)),
+        #S_T = ordered(S_T, levels = c("sen_DMSO", "everR_DMSO",
+        #                               "sen_ever", "everR_ever"))
+        ) %>%
+  #filter(Gene %in% all.ligand.names) %>% #LIGANDS
+  ggplot(mapping = aes(
+                       x = S_T,
+                       y = Expression.log2cpm, 
+                         )) +
+    theme_classic() +
+    geom_point(mapping = aes(
+                             x = factor(S_T, levels = c("everR_ever", "sen_ever",
+                                                        "everR_DMSO", "sen_DMSO")),
+                             #x = S_T,
+                             color = S_T,
+                             shape = cellLine, 
+                             #fill = drug, 
+                             alpha = 0.85
+                             ),
+               size = 2.5,
+               position = position_dodge2(width = 0.4)
+               ) +
+  scale_color_manual(values = c("dodgerblue", "deeppink4", 
+                                "cyan3", "hotpink3")) +
+    #ggtitle(i) +
+  theme(
+        axis.text.y = element_text(size = 5, face = "bold"),
+        axis.text.x = element_text(size = 9, face = "bold"),
+        axis.title = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 10),
+        legend.text = element_text(size = 8, face = "bold"),
+        legend.title = element_text(size = 8, face = "bold"),
+        #plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+        #panel.border = element_rect(color = "white")
+        
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.2, "cm")
+        ) +
+  facet_wrap(~Gene, scales = "free", ncol = 2 
+  #facet_wrap(~Gene, scales = "free", ncol = 3
+             #strip.position = "top"
+             ) +
+  xlab("") +
+  ylab("Growth factor receptor expression \n (log2cpm)") +
+  guides(color = guide_legend(title = "Treatment/State", face = "bold", 
+                              size = 8,
+                              override.aes = list(size = 4)),
+         shape = guide_legend(title = "Cell Line",
+                              size = 8,
+                              override.aes = list(size = 4)),
+         alpha = "none") +
+  stat_summary(mapping = aes(color = T_S), 
+               geom = "pointrange", position = "identity",
+               fun.args = list(mult = 1), 
+               fun.data = mean_sdl,
+               alpha = 0.4, 
+               color = c("grey10"), 
+               size = 0.3) + 
+  #stat_compare_means(
+  #                   comparisons = mycomparisons,
+  #                   method = "t.test",
+  #                   aes(label = after_stat(p.signif))
+  #                   ) +
+  stat_pvalue_manual(stat.test1, 
+                     #label = "FDR = {FDR}", 
+                     #label = "p = {p.value}",
+                     label = "p.value.signif",
+                     #label = "FDR.signif",
+                     size = 4, coord.flip = T,
+                     tip.length = 0.01, bracket.size = .2, step.increase = 0,
+                     hide.ns = F) +
+  coord_flip()
+p1
+
+ 
+#Plot GF ligands
+
+rl <- "GFR.ligands"
+mycomparisons <- list(c("sen_DMSO", "everR_DMSO"), c("sen_ever", "everR_ever"))
+
+ligs <- c("IGF2", "GNAI2", "HRAS", "SORBS1", "CDH1", "NAMPT")
+
+tmp.r <- coef.genes_s.dmso %>% 
+  filter(Gene %in% ligs,
+         coefficient == "stateeverR") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.e <- coef.genes_s.dmso %>% 
+  filter(Gene %in% ligs,
+         coefficient == "treatmentever") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.s <- coef.genes_r.ever %>% 
+  filter(Gene %in% ligs,
+         coefficient == "statesen") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp.d <- coef.genes_r.ever %>% 
+  filter(Gene %in% ligs,
+         coefficient == "treatmentDMSO") %>% 
+  select(Gene, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene, comparison)
+
+tmp <- tmp.r %>% 
+  full_join(tmp.s, by = colnames(.)) %>% 
+  full_join(tmp.e, by = colnames(.)) %>% 
+  full_join(tmp.d, by = colnames(.))
+tmp
+
+b.data1 <- b.data %>% 
+  filter(Gene %in% ligs) %>% 
+  mutate(S_T = ordered(S_T, levels = c("sen_DMSO", "everR_DMSO",
+                                       "sen_ever", "everR_ever"))) %>% 
+  mutate_at(vars(Gene, cellLine, cellLine2, C_S_T), factor)
+str(b.data1)
+
+stat.test <- foreach (i = ligs, .combine = "rbind") %do% { 
+  
+  print(i)
+  
+  tmp1 <- tmp %>% 
+    filter(Gene == i)
+  
+  b.data1 %>%
+  filter(Gene == i) %>% 
+  group_by(Gene) %>% 
+  t_test(Expression.log2cpm ~ S_T) %>%
+  #filter(!groups %in% list(c("sen_ever", "everR_DMSO"), 
+  #                         c("sen_DMSO", "everR_ever"))) %>% 
+  add_xy_position(x = "S_T", scales = "free", step.increase = 0.2) %>% 
+  ungroup() %>% 
+  filter(groups %in% list(c("sen_DMSO", "everR_DMSO"), 
+                           c("sen_ever", "everR_ever"))) %>% 
+  mutate(comparison = #ifelse(group1 == "everR_DMSO" & group2 == "everR_ever",
+                      #       "R.DMSO.vs.R.ever",
+                      #ifelse(group1 == "everR_DMSO" & group2 == "sen_DMSO",
+                      #       "R.vs.S_DMSO",
+                      #ifelse(group1 == "everR_ever" & group2 == "sen_ever" ,
+                      #       "S.vs.R_ever",
+                      #ifelse(group1 == "sen_DMSO" & group2 == "sen_ever",
+                      #       "S.ever.vs.S.DMSO", 
+                      ifelse(group1 == "sen_DMSO" & group2 == "everR_DMSO",
+                             "R.vs.S_DMSO",
+                      ifelse(group1 == "sen_ever" & group2 == "everR_ever" ,
+                             "S.vs.R_ever", "error"#))))
+                      ))) %>% 
+  arrange(Gene, comparison) %>% 
+  group_by(Gene, comparison) %>% 
+  left_join(tmp1, by = join_by(Gene, comparison)) %>% 
+  ungroup() %>% 
+  #add_significance(p.col = "FDR") %>% 
+  add_significance(p.col = "p.value") %>% 
+  mutate(xmin = ifelse(group1 == "sen_DMSO", 3, 1),
+         xmax = ifelse(group1 == "sen_DMSO", 4, 2))
+    
+}
+
+stat.test2 <- stat.test %>% 
+  mutate(Gene = factor(Gene, levels = ligs),
+         )
+
+#Plot
+p2 <- b.data1 %>% 
+  filter(Gene %in% c(ligs)) %>% #GFR ligands
+  mutate(Gene = factor(Gene, levels = c(ligs))) %>%
+  ggplot(mapping = aes(
+                       x = S_T,
+                       y = Expression.log2cpm, 
+                         )) +
+    theme_classic() +
+    geom_point(mapping = aes(
+                             x = factor(S_T, levels = c("everR_ever", "sen_ever",
+                                                        "everR_DMSO", "sen_DMSO")),
+                             #x = S_T,
+                             color = S_T,
+                             shape = cellLine, 
+                             #fill = drug, 
+                             alpha = 0.85
+                             ),
+               size = 2.5,
+               position = position_dodge2(width = 0.4)
+               ) +
+  scale_color_manual(values = c("dodgerblue", "deeppink4", 
+                                "cyan3", "hotpink3")) +
+    #ggtitle(i) +
+  theme(
+        axis.text.y = element_text(size = 5, face = "bold"),
+        axis.text.x = element_text(size = 9, face = "bold"),
+        axis.title = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 10),
+        legend.text = element_text(size = 8, face = "bold"),
+        legend.title = element_text(size = 8, face = "bold"),
+        #plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+        #panel.border = element_rect(color = "white")
+        
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.2, "cm")
+        ) +
+  facet_wrap(~Gene, scales = "free", ncol = 3
+             #strip.position = "top"
+             ) +
+  xlab("") +
+  ylab("Growth factor receptor expression \n (log2cpm)") +
+  guides(color = guide_legend(title = "Treatment/State", face = "bold", 
+                              size = 8,
+                              override.aes = list(size = 4)),
+         shape = guide_legend(title = "Cell Line",
+                              size = 8,
+                              override.aes = list(size = 4)),
+         alpha = "none") +
+  stat_summary(mapping = aes(color = T_S), 
+               geom = "pointrange", position = "identity",
+               fun.args = list(mult = 1), 
+               fun.data = mean_sdl,
+               alpha = 0.4, 
+               color = c("grey10"), 
+               size = 0.3) + 
+  #stat_compare_means(
+  #                   comparisons = mycomparisons,
+  #                   method = "t.test",
+  #                   aes(label = after_stat(p.signif))
+  #                   ) +
+  stat_pvalue_manual(stat.test2, 
+                     #label = "FDR = {FDR}", 
+                     #label = "p = {p.value}",
+                     label = "p.value.signif",
+                     #label = "FDR.signif",
+                     size = 4, coord.flip = T,
+                     tip.length = 0.01, bracket.size = .2, step.increase = 0,
+                     hide.ns = F) +
+  coord_flip()
+p2
+
+#p2 <- p + theme(axis.text.y = element_blank())
+#p2
+
+.f = function() {
+#save
+p1
+ggsave(filename = paste0("GF.receptor_ESR1_IGF1R_IGF2R_INSR_expression.tiff"),
+         device = "tiff", path = paste0(dir, dir2, "figures/"), 
+       units = "in", width = 8, height = 4, dpi = 300, create.dir = T)
+
+#save
+p2
+ggsave(filename = paste0("GF.receptorLigands_IGF2_GNAI2_HRAS_SORBS1_CDH1_NAMPT_",
+                         "expression.tiff"),
+         device = "tiff", path = paste0(dir, dir2, "figures/"), 
+       units = "in", width = 8, height = 4, dpi = 300, create.dir = T)
+}
+
+.f = function() {
+#p2 <- p + theme(axis.text.y = element_blank())
+#p2
+#library(gtable)
+#library(grid)
+#Replace grobs of first graph with second graph
+#Change ggplot graph to grob g table
+p_tab <- ggplotGrob(p)
+p_tab2 <- ggplotGrob(p2)
+p_tab
+p_tab2
+
+p_tab[[1]][[38]] <- p_tab2[[1]][[39]]
+p_tab[[1]][[39]] <- p_tab2[[1]][[39]]
+p_tab[[1]][[40]] <- p_tab2[[1]][[39]]
+p_tab[[1]][[42]] <- p_tab2[[1]][[39]]
+p_tab[[1]][[43]] <- p_tab2[[1]][[39]]
+p_tab[[1]][[44]] <- p_tab2[[1]][[39]]
+#p_tab[[1]][[45]] <- p_tab2[[1]][[39]]
+grid.draw(p_tab)
+
+setwd(dir = paste0(dir, "database_receptor_ligand/figures/"))
+tiff(filename = paste("resistant.v.sensitive", rl, "log2CPM_DotPlot.tiff", 
+                        sep = "_"), units = "in", 
+       width = 8, height = 5.5, res = 300)
+grid.draw(p_tab)
+dev.off()
+}
+```

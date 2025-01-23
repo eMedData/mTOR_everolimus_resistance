@@ -1,0 +1,326 @@
+---
+title: "02_DEGs_lme_model"
+author: "Eric Medina"
+date: "2024-08-06"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+library(data.table)
+library(openxlsx)
+library(foreach)
+library(lmerTest)
+library(conflicted)
+library(tidyverse)
+conflict_prefer_all("dplyr", quiet = T)
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#Sample info
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "counts/"
+dir2 <- "degs/"
+
+#FUNCTION TO CONVERT LMER RESULTS INTO A DATA FRAME
+lme2df <- function(x) {
+  x <- enframe(x)
+  x %>%
+    separate(value, into = c("Estimate", "Std.Error", "df", "t_value", 
+                             "P.value"),
+             sep = ",") %>%
+    mutate(Estimate = gsub(pattern = "[:c(Estimate = :]", replacement = "", 
+                           Estimate),
+           Std.Error = gsub(pattern = "[:`Std Error` = :]", replacement = "", 
+                            Std.Error),
+           Std.Error = sub(pattern = "[:.?:]", replacement = "", Std.Error),
+           df = gsub(pattern = "[:df = :]", replacement = "", df),
+           t_value = gsub(pattern = "[:t value` = :]", replacement = "", 
+                          t_value),
+           P.value = gsub(pattern = "[:`Pr(>|t|)` = :]", replacement = "", 
+                          P.value)) %>%
+  mutate_at(c("Estimate", "Std.Error", "df", "t_value", "P.value"), as.numeric) 
+}
+
+#Run LME model to identify DEGs
+```
+
+```{r}
+set.seed(09032024)
+
+start.all <- Sys.time()
+
+#Read in counts in model format
+setwd(paste0(dir, dir1, "filtered/"))
+#list.files()
+b.data <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                             #"model_format_post_filtered_counts_v5.txt"), #12518 genes
+                             #"model_format_post_filtered_counts_v6.txt"), #13153 genes
+                             "model_format_post_filtered_counts_v7.txt"), #11680 genes
+            sep = "\t", header = T, quote = "")
+
+#Get gene names
+g.names.tmp <- b.data %>% 
+  arrange(Gene) %>% 
+  pull(Gene) %>% 
+  unique() %>% 
+  as.character()
+
+#PRE-treatment comparison : Sensitive and DMSO as references
+treatment.time <- "pre.Treatment"
+state.ref <- "sen"
+treatment.ref <- "DMSO"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+
+#Relevel references for model
+b.data$state <- relevel(as.factor(b.data$state), ref = state.ref)
+b.data$treatment <- relevel(as.factor(b.data$treatment), ref = treatment.ref) 
+
+str(b.data)
+levels(b.data$state)
+levels(b.data$treatment)
+rows <- nrow(b.data)
+
+#Run model
+
+start <- Sys.time()
+
+g_lme_s.dmso <- foreach(i = g.names.tmp) %do% {
+  print(i)
+  tmp <- b.data %>%
+    filter(Gene == i)
+  print(i)
+  lmerTest::lmer(formula = Expression.log2cpm ~ state * treatment + (1|cellLine),
+                          data = tmp)
+}
+
+names(g_lme_s.dmso) <- g.names.tmp
+end <- Sys.time()
+print(lme1 <- end- start)
+
+#Time difference of 10.47455 mins
+
+g_lme_s.dmso[[1]]
+summary(g_lme_s.dmso[[1]])
+coef(summary(g_lme_s.dmso[[1]]))
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+coef.genes_s.dmso <- foreach(i = g.names.tmp, .combine = "rbind") %do% {
+    print(i)
+  
+    coef(summary(g_lme_s.dmso[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "stateeverR", "R.vs.S_DMSO",
+                          ifelse(coefficient == "treatmentever", 
+                                 "S.ever.vs.S.DMSO", 
+                                 "S.vs.R.ever_vs_S.vs.R.DMSO"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "stateeverR" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "stateeverR" & Estimate < 0, "sen.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate < 0, "sen.DMSO",
+                           "interaction")))))) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene, comparison, enriched), as.factor)
+}
+
+end <- Sys.time()
+print(df1 <- end- start)
+#Time difference of 6.91048 mins
+
+head(coef.genes_s.dmso)
+
+#Isolate each coefficient and calculate FDR
+start <- Sys.time()
+
+coef.genes_s.dmso <- coef.genes_s.dmso %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  select(Gene, Estimate, std.error, df, t.value, FDR, p.value, coefficient, 
+             comparison, enriched)
+
+end <- Sys.time()
+fdr.time.1 <- end-start
+
+head(coef.genes_s.dmso)
+
+#Put into list
+coef.genes_s.dmso_list <- list("Intercept" = coef.genes_s.dmso %>% 
+                                        filter(coefficient == "Intercept"),
+                           "stateeverR" = coef.genes_s.dmso %>% 
+                                        filter(coefficient == "stateeverR"),
+                           "treatmentever" = coef.genes_s.dmso %>% 
+                                        filter(coefficient == "treatmentever"),
+                           "stateeverR_treatmentever" = coef.genes_s.dmso %>% 
+                             filter(coefficient == "stateeverR_treatmentever"))
+#.f = function() {
+#Save
+#PRE-treatment comparison : Sensitive and DMSO as references
+setwd(dir = paste0(dir, dir2, "lmeModelResults/", treatment.time))
+
+#Excel version
+openxlsx::write.xlsx(coef.genes_s.dmso_list, file = paste(prefix, cellSamples,
+                                                          "Genes", refs, "refs", 
+                                                          treatment.time,
+                                                          "lme_results_v7.xlsx",
+                                                          sep = "_"))
+
+#Save txt version
+fwrite(coef.genes_s.dmso, file = paste(prefix, cellSamples, "Genes", refs, 
+                                       "refs", treatment.time,
+                                       "lme_results_v7.txt",
+                                       sep = "_"), 
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+#Post-treatment comparison : Resistant and everolimus as references
+treatment.time <- "post.Treatment"
+state.ref <- "everR"
+treatment.ref <- "ever"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+#Relevel references for model
+b.data$state <- relevel(as.factor(b.data$state), ref = state.ref)
+b.data$treatment <- relevel(as.factor(b.data$treatment), ref = treatment.ref) 
+
+str(b.data)
+levels(b.data$state)
+levels(b.data$treatment)
+rows <- nrow(b.data)
+
+#Run model
+start <- Sys.time()
+g_lme_r.ever <- foreach(i = g.names.tmp) %do% {
+  
+  print(i)
+  tmp <- b.data %>%
+    filter(Gene == i)
+  lmerTest::lmer(formula = Expression.log2cpm ~ state * treatment + (1|cellLine),
+                          data = tmp)
+}
+end <- Sys.time()
+print(lme2 <- end- start)
+#Time difference of 10.95062 mins
+
+names(g_lme_r.ever) <- g.names.tmp
+
+g_lme_r.ever[[1]]
+summary(g_lme_r.ever[[1]])
+coef(summary(g_lme_r.ever[[1]]))
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef.genes_r.ever <- foreach(i = g.names.tmp, .combine = "rbind") %do% {
+    print(i)
+  
+    coef(summary(g_lme_r.ever[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename(std.error = "Std. Error",
+             t.value = "t value",
+             p.value = "Pr(>|t|)") %>% 
+      add_column(Gene = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "statesen", "S.vs.R_ever",
+                          ifelse(coefficient == "treatmentDMSO", "R.DMSO.vs.R.ever",
+                             "R.vs.S.DMSO_vs_R.vs.S.ever"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "statesen" & Estimate > 0, "Sens.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "statesen" & Estimate < 0, "everR.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate < 0, "everR.ever",
+                           "interaction")))))) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(df2 <- end- start)
+#Time difference of 6.935199 mins
+
+head(coef.genes_r.ever)
+
+#Isolate each coefficient and calculate FDR
+start <- Sys.time()
+
+coef.genes_r.ever <- coef.genes_r.ever %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  select(Gene, Estimate, std.error, df, t.value, FDR, p.value, coefficient, 
+             comparison, enriched)
+
+end <- Sys.time()
+fdr.time.2 <- end-start
+
+head(coef.genes_r.ever)
+
+#Put into list
+coef.genes_r.ever_list <- list("Intercept" = coef.genes_r.ever %>% 
+                                        filter(coefficient == "Intercept"),
+                               "statesen" = coef.genes_r.ever %>% 
+                                        filter(coefficient == "statesen"),
+                               "treatmentDMSO" = coef.genes_r.ever %>% 
+                                        filter(coefficient == "treatmentDMSO"),
+                               "statesen_treatmentDMSO" = coef.genes_r.ever %>%
+                                 filter(coefficient == "statesen_treatmentDMSO"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir2, "lmeModelResults/", treatment.time))
+
+#Excel version
+openxlsx::write.xlsx(coef.genes_r.ever_list, file = paste(prefix, cellSamples,
+                                                          "Genes", refs, "refs", 
+                                                          treatment.time,
+                                                          "lme_results_v7.xlsx",
+                                                          sep = "_"))
+
+#Txt version
+fwrite(coef.genes_r.ever, file = paste(prefix, cellSamples, "Genes", refs, 
+                                       "refs", treatment.time,
+                                       "lme_results_v7.txt",
+                                       sep = "_"), 
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+end.all <- Sys.time()
+print(all.script <- end.all - start.all)
+#Time difference of 32.43301 mins
+```

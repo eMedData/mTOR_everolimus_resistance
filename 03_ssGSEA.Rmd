@@ -1,0 +1,174 @@
+---
+title: "02_ssGSEA"
+author: "Eric Medina"
+date: "2024-07-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(data.table)
+library(openxlsx)
+library(foreach)
+library(conflicted)
+library(msigdbr)
+#library(kableExtra)
+library(GSEABase)
+library(GSVA)
+library(tidyverse)
+conflict_prefer_all("dplyr", quiet = T)
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#Sample info
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "counts/"
+dir2 <- "degs/"
+dir3 <- "ssgsea/"
+```
+
+```{r}
+start.all <- Sys.time()
+
+set.seed(09042024)
+
+
+#Read in filtered counts
+setwd(dir = paste0(dir, dir1, "filtered/"))
+#list.files()
+
+lcpm.filt <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                              "logCPM_filtered_normalized_11680_genes.txt"),
+                sep = "\t", header = T, quote = "")
+
+lcpm.filt <- lcpm.filt %>% 
+  column_to_rownames(var = "gene") %>% 
+  as.matrix()
+head(lcpm.filt)[,1:5]
+
+start <- Sys.time()
+
+collection <- c("H", "C2", "C5", "C6")
+
+#Run ssGSEA
+
+start <- Sys.time()
+
+gsva. <- foreach(i = collection) %do% {
+  #Get pathways for collection
+  pathways <- msigdbr(species = "Homo sapiens", category = i) %>%
+    select(gs_name, gene_symbol) %>% 
+        unique() %>%
+    group_by(gs_name)
+  
+  pathways <- split(x = pathways$gene_symbol, f = pathways$gs_name)
+  
+  #Run ssgsea
+  gsva(expr = lcpm.filt, gset.idx.list =  pathways,
+       method="ssgsea",  min.sz = 15, max.sz = 500, verbose=TRUE, 
+       kcdf="Gaussian", parallel.sz=1L, mx.diff = T,
+       tau = 0.25, ssgsea.norm = T)
+}
+
+
+end <- Sys.time()
+print(gsea.time <- end-start)
+#Time difference of 2.019929 mins
+
+#Insert column names
+names(gsva.) <- collection
+
+#Split list based on collection
+gsva.H <- gsva.$H %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+gsva.c2 <- gsva.$C2 %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+gsva.c5 <- gsva.$C5 %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+gsva.c6 <- gsva.$C6 %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+gsva.2 <- list("H" = gsva.H, 
+               "C2" = gsva.c2, 
+               "C5" = gsva.c5, 
+               "C6" = gsva.c6)
+
+
+#Make dataframe for statistical testing for all collections
+
+start <- Sys.time()
+
+gsva.data.all <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  gsva.2[[i]] %>% 
+    as.data.frame() %>% 
+    pivot_longer(! Gene_Set, names_to = "Cell", 
+               values_to = "Enrichment_Score") %>%
+    separate(Cell, into = c("cellLine", "state", "treatment", "rep", "num"),
+           remove = F, sep = "_") %>% 
+    mutate(num = ifelse(is.na(num), rep, num),
+         rep = ifelse(rep == num, treatment, rep),
+         treatment = ifelse(treatment == rep, state, treatment),
+         state = ifelse(state == treatment, "sen", state))  %>%
+    unite(S_T, c(state:treatment), remove = F, sep = "_") %>% 
+    mutate(cellLine2 = ifelse(cellLine == "CAMA1", "C",
+                            ifelse(cellLine == "MCF7", "M", "T"))) %>% 
+    unite(C_S_T, c(cellLine2, state, treatment), sep = "_", remove = F)  %>% 
+    unite(rep, c(rep, num), sep = "_", remove = T) %>% 
+    mutate(collection = i) %>% 
+    separate(Gene_Set, into = c("collection2", "junk"), sep = "_", remove = F) %>% 
+    select(-junk) %>% 
+    select(Cell, Gene_Set, Enrichment_Score, cellLine, cellLine2, state, 
+           treatment, S_T, C_S_T, collection, collection2, rep) %>% 
+    mutate_at(vars(Gene_Set, cellLine, cellLine2, state, treatment, S_T, C_S_T,
+                   collection, collection2), factor) %>% 
+    mutate_at(vars(Enrichment_Score), as.numeric)  
+
+}
+end <- Sys.time()
+print(df.time <- end-start)
+#Time difference of 8.608556 secs 
+
+head(gsva.data.all)
+
+.f = function() {
+#Save scores
+setwd(dir = paste0(dir, dir3, "rawScores/"))
+openxlsx::write.xlsx(gsva.2, file = paste(prefix, cellSamples, 
+                                  "ssGSEA_collections_H.C2.C5.C6_scores_v7.xlsx",
+                                  sep = "_"))
+
+fwrite(gsva.data.all, file = paste(prefix, cellSamples, "ssGSEA_collections", 
+                                   "H_C2_C5_C6_scores_LongFormat_v7.txt",
+                                  sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+}
+
+end.all <- Sys.time()
+time.all <- end.all - start.all
+#Time difference of 3.45351 mins
+```

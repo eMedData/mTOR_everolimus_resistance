@@ -1,0 +1,3625 @@
+---
+title: "merg two heatmaps figure 3"
+author: "Eric Medina"
+date: "2023-10-23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(GetoptLong)
+library(data.table)
+library(openxlsx)
+library(conflicted)
+library(ggrepel)
+library(tidyverse)
+
+conflict_prefer_all("dplyr", quiet = T)
+
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir2 <- "ssgsea/"
+dir3 <- "metaPhenotypeAnalysis/"
+
+#PICK COLOR FOR HEATMAP
+ramp <- colorRamp(c("darkred", "lightblue", "black"))
+ramp.list <- rgb(ramp(seq(0, 1, length = 10)), max = 255)
+ramp.list
+barplot(rep(1, 10), axes = FALSE, space = 0, col = ramp.list)
+dark.red <- "#800000"
+white.grey <- "#FFFFFF" #white
+light.blue <- "#B6DCE8" #light blue
+myCol <- colorRampPalette(c(light.blue, white.grey, dark.red))(100)
+myBreaks <- seq(-1.2, 1.2, length.out=101)
+```
+
+```{r}
+set.seed(09072024)
+#stateR
+
+#MAKE HEATMAP FOR FIGURE 3 SHOWING GROWTH FACTOR GENE SETS
+
+#keep <- "GF_SIGNALING"
+#Get info from lme for these meta phenotypes
+
+#resistant vs sensitive DMSO
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+lmeResults <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+tmp <- lmeResults %>% 
+  filter(grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Keep meta phenotypes of interest
+#main.metas <- c("GF_SIGNALING", "IMMUNE_RESPONSE", "GPCR_SIGNALING",
+#          "STEMNESS", "ANTI.APOPTOSIS", "CELL_CYCLE",  
+#          "METABOLISM", "APOPTOSIS", "TF_ACTIVITY",
+#          "STRESS_RESPONSE", "RHO_GTPASE_SIGNALING",
+#          "TP53_SIGNALING", "CELL_MIGRATION")
+
+#Coefficient of interest
+coeff <- "stateeverR"
+
+#Get statistically significant pathways
+stateR2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         #metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+
+#RESISTANT VS SENSITIVE EVER
+
+#Coefficient of interest
+coeff <- "statesen"                              
+stateS2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         #metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+#Merge gene sets
+gs.stateR <- stateR2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+gs.stateS <- stateS2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+gs.all <- c(gs.stateR, gs.stateS) %>% 
+  unique()
+
+#Get enrichment scores for gene sets
+setwd(paste0(dir, dir2, "rawScores/"))
+#list.files()
+ssgsea <- fread(file = paste0("COH069_15929R_RNA_everSamples_ssGSEA_",
+                              "collections_H_C2_C5_C6_scores_LongFormat_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+#Get gene sets of interest 
+heat1 <- ssgsea %>% 
+  filter(Gene_Set %in% gs.all) %>% 
+  select(Gene_Set, Enrichment_Score, Cell) %>% 
+  pivot_wider(names_from = "Cell", values_from = "Enrichment_Score") %>% 
+  column_to_rownames(var = "Gene_Set") %>% 
+  as.matrix()
+head(heat1)[,1:15]
+
+#Get row number
+rows <- nrow(heat1)
+
+#.f = function() {
+
+#Scale each cell line individually, then merge
+##This worked well
+c <- heat1[,grepl(pattern = "CAMA", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "MCF", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+t <- heat1[,grepl(pattern = "T47D", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  dplyr::select(c("CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  "MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  "T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  "CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  "CAMA1_everR_DMSO_rep_3",
+                  "MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  "MCF7_everR_DMSO_rep_3",
+                  "T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  "T47D_everR_DMSO_rep_3",
+                  "CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  "MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  "T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  "CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  "CAMA1_everR_ever_rep_3",
+                  "MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  "MCF7_everR_ever_rep_3",
+                  "T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  "T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+#}
+
+.f = function() {
+heat2 <- t(scale(t(heat1)))
+
+heat2 <- heat2 %>% 
+  as.data.frame() %>%
+  dplyr::select(c("CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  "MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  "T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  "CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  "MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  "T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  "CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  "CAMA1_everR_DMSO_rep_3",
+                  "MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  "MCF7_everR_DMSO_rep_3",
+                  "T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  "T47D_everR_DMSO_rep_3",
+                  "CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  "CAMA1_everR_ever_rep_3",
+                  "MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  "MCF7_everR_ever_rep_3",
+                  "T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  "T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+}
+
+#Reduced name lengths that match order above
+colnames(heat2) <- c(rep("S_DMSO.C", 3),
+                     rep("S_DMSO.M", 3),
+                     rep("S_DMSO.T", 3),
+                     rep("R_DMSO.C", 3),
+                     rep("R_DMSO.M", 3),
+                     rep("R_DMSO.T", 3),
+                     rep("S_ever.C", 3),
+                     rep("S_ever.M", 3),
+                     rep("S_ever.T", 3),
+                     rep("R_ever.C", 3),
+                     rep("R_ever.M", 3),
+                     rep("R_ever.T", 3))
+
+
+#hierarchical clustering for rows
+d <- hclust(dist(heat2, method = 'euclidean'), method = 'ward.D2')
+
+
+#MAKE MATRIX WITH COLNAMES AS CELL LINES FOR LEGEND
+cells.df <- heat2
+colnames(cells.df)  <- c(rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3))
+
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+treatment.df <- heat2
+colnames(treatment.df)  <- c(rep("DMSO", 18),
+                     #rep("Everolimus", 9),
+                     #rep("DMSO", 9),
+                     rep("Everolimus", 18))
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+state.df <- heat2
+colnames(state.df)  <- c(rep("Sensitive", 9),
+                     rep("Resistant", 9),
+                     rep("Sensitive", 9),
+                     rep("Resistant", 9))
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(treatment.df),
+                               State = colnames(state.df),
+                               col = list(CellLines = c("CAMA1" = "yellow",
+                                                        "MCF7" = "purple",
+                                                        "T47D" = "orange"),
+                                          Treatment = c("DMSO" = "#006400",
+                                                        "Everolimus" = "#0000FF"),
+                                          State = c("Sensitive" = "cyan3",
+                                                    "Resistant" = "hotpink3")),
+                               annotation_name_gp= gpar(fontsize = 8),
+                               #annotation_height=unit(1,"mm"),
+                               annotation_name_side = "left",
+                               #annotation_name_side = "right",
+                               #annotation_name_rot = -180
+                               #height = unit(0, "mm"),
+                               annotation_legend_param = 
+                                 list(labels_gp = gpar(fontsize = 9,
+                                                       fontface = "bold"),
+                                      title_gp = gpar(fontsize = 9, 
+                                                      fontface = "bold")),
+                               simple_anno_size = unit(0.1, "in"))
+
+
+#read in preTx metaphenotype analysis
+setwd(paste0(dir, "metaPhenotypeAnalysis/"))
+ftest4.stateR1 <- fread(file = paste0("stateR_S.vs.R_DMSOmetaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  pull(metaphenotype) %>% 
+  unique() %>% 
+  as.character()
+
+#read in postTx metaphenotype analysis
+ftest4.stateR2 <- fread(file = paste0("stateS_S.vs.R_evermetaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  pull(metaphenotype) %>% 
+  unique() %>% 
+  as.character()
+
+#Combine
+metaTop <- c(ftest4.stateR1, ftest4.stateR2) %>% unique()
+
+#MAKE LEGEND FOR ANNOTATIONS AND SUB ANNOTATIONS FOR TOP PATHWAYS
+##TOP 20 ANNOTATIONS: UP IN resistant.DMSO
+
+#Make legend for annotations and sub annotations for top pathways
+## Up in resistant.dmso (donw in sensitive.dmso)
+#Anti apoptosis
+keep <- c("ANTI.APOPTOSIS")
+ANTI.APOPTOSIS_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+ANTI.APOPTOSIS_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+notes.keep2 <- c("REACTOME_ACTIVATION_OF_BH3_ONLY_PROTEINS", 
+                 "REACTOME_INTRINSIC_PATHWAY_FOR_APOPTOSIS")
+
+top9_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  dplyr::arrange(enriched) %>%
+  filter(Gene_Set %in% notes.keep2) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top9_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & enriched == "everR.ever") %>%
+  dplyr::arrange(FDR) %>%
+  filter(Gene_Set %in% notes.keep2) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+ANTI.APOPTOSIS <- c(ANTI.APOPTOSIS_R, ANTI.APOPTOSIS_S) %>% unique()
+top9 <- c(top9_R, top9_S) %>% unique()
+
+#APOPTOSIS
+keep <- c("APOPTOSIS")
+APOPTOSIS_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+APOPTOSIS_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top10_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top10_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+APOPTOSIS <- c(APOPTOSIS_R, APOPTOSIS_S) %>% unique()
+top10 <- c(top10_R, top10_S) %>% unique() %>% .[1:3]
+
+
+
+#AQUAPORIN.MEDIATED_TRANSPORT
+keep <- c("AQUAPORIN.MEDIATED_TRANSPORT")
+AQUAPORIN.MEDIATED_TRANSPORT_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+AQUAPORIN.MEDIATED_TRANSPORT_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+AQUAPORIN.MEDIATED_TRANSPORT <- c(AQUAPORIN.MEDIATED_TRANSPORT_R, 
+                  AQUAPORIN.MEDIATED_TRANSPORT_S) %>% unique()
+
+
+#AXON_GUIDANCE
+keep <- c("AXON_GUIDANCE")
+AXON_GUIDANCE_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+AXON_GUIDANCE_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+AXON_GUIDANCE <- c(AXON_GUIDANCE_R, 
+                  AXON_GUIDANCE_S) %>% unique()
+
+
+#cell cycle
+keep <- c("CELL_CYCLE")
+CELL_CYCLE_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_CYCLE_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+not.keep <- c("BIOCARTA_ARF_PATHWAY")
+top11_R <- stateR2 %>% 
+  filter(metaphenotype == keep) %>%
+  filter(!Gene_Set %in% not.keep) %>%
+  arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top11_S <- stateS2 %>% 
+  filter(metaphenotype == keep & enriched == "everR.ever") %>%
+  filter(!Gene_Set %in% not.keep) %>%
+  arrange(FDR) %>%
+  #slice_head(n = 3) %>%
+  filter(Gene_Set %in% c("REACTOME_G1_S_DNA_DAMAGE_CHECKPOINTS", 
+                         "REACTOME_MITOTIC_G2_G2_M_PHASES",
+      "REACTOME_THE_ROLE_OF_GTSE1_IN_G2_M_PROGRESSION_AFTER_G2_CHECKPOINT")) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_CYCLE <- c(CELL_CYCLE_R, CELL_CYCLE_S) %>% unique()
+top11 <- c(top11_R, top11_S) %>% unique()
+
+
+#CELL_JUNCTION
+keep <- c("CELL_JUNCTION")
+CELL_JUNCTION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_JUNCTION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_JUNCTION <- c(CELL_JUNCTION_R, 
+                  CELL_JUNCTION_S) %>% unique()
+
+
+#DNA_REPAIR
+keep <- c("DNA_REPAIR")
+DNA_REPAIR_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+DNA_REPAIR_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+DNA_REPAIR <- c(DNA_REPAIR_R, 
+                  DNA_REPAIR_S) %>% unique()
+
+#ECM_ORGANIZATION
+keep <- c("ECM_ORGANIZATION")
+ECM_ORGANIZATION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ECM_ORGANIZATION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ECM_ORGANIZATION <- c(ECM_ORGANIZATION_R, 
+                  ECM_ORGANIZATION_S) %>% unique()
+
+
+#ER_GOLGI_TRANSPORT
+keep <- c("ER_GOLGI_TRANSPORT")
+ER_GOLGI_TRANSPORT_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ER_GOLGI_TRANSPORT_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ER_GOLGI_TRANSPORT <- c(ER_GOLGI_TRANSPORT_R, 
+                  ER_GOLGI_TRANSPORT_S) %>% unique()
+
+
+#GF SIGNALING
+keep <- c("GF_SIGNALING")
+GF_SIGNALING_R <- stateR2 %>% #loaded this in "figher.method_v6" script
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  #pull(Notes) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#keep <- c("GF_SIGNALING")
+GF_SIGNALING_S <- stateS2 %>% #loaded this in "figher.method_v6" script
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  #pull(Notes) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+GF_SIGNALING <- c(GF_SIGNALING_R, GF_SIGNALING_S) %>% unique()
+
+#Get GF signaling pathways to label
+keep.notes <- "ESTROGEN_SIGNALING"
+not.keep <- c("BIOCARTA_EFP_PATHWAY", 
+              "REACTOME_ESTROGEN_DEPENDENT_GENE_EXPRESSION")
+
+top1.2_R <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  dplyr::arrange(FDR) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#keep.notes <- "ESTROGEN_SIGNALING"
+top1.2_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  dplyr::arrange(FDR) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+top1.2 <- c(top1.2_R, top1.2_S) %>% unique() %>% .[3:6]
+
+
+keep.notes <- "INSULIN_SIGNALING"
+not.keep <- c("KEGG_TYPE_II_DIABETES_MELLITUS", 
+              "REACTOME_ADRENALINE_NORADRENALINE_INHIBITS_INSULIN_SECRETION",
+              "REACTOME_REGULATION_OF_INSULIN_SECRETION",
+              paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_IGF_",
+                     "TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_FACTOR_",
+                     "BINDING_PROTEINS_IGFBPS"), "HALLMARK_PANCREAS_BETA_CELLS",
+              "REACTOME_SIGNALING_BY_INSULIN_RECEPTOR")
+top1.3_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  dplyr::arrange(desc(Estimate)) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#Filter post treatment results
+top1.3_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top1.3 <- c(top1.3_R, top1.3_S) %>% unique()
+
+
+keep.notes <- "MAPK_SIGNALING"
+not.keep <- c("BIOCARTA_AT1R_PATHWAY", 
+              "BIOCARTA_PYK2_PATHWAY",
+              "KEGG_GNRH_SIGNALING_PATHWAY", 
+              paste0("REACTOME_JNK_C_JUN_KINASES_PHOSPHORYLATION_AND_",
+                     "ACTIVATION_MEDIATED_BY_ACTIVATED_HUMAN_TAK1"))
+top1.4_R <- stateR2 %>% 
+  filter(!Gene_Set %in% not.keep) %>% 
+  filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes,
+                ) %>%
+  dplyr::arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  dplyr::arrange(desc(Estimate)) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#Filter post treatment results
+top1.4_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n = 1) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top1.4 <- c(top1.4_R, top1.4_S) %>% unique()
+
+
+keep.notes <- "ERBB_SIGNALING"
+#not.keep <- c()
+top1.5_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 1) %>% 
+  #filter(!Gene_Set %in% not.keep) %>% 
+  #dplyr::arrange(desc(Estimate)) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#Filter post treatment results
+top1.5_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR)  %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+top1.5 <- c(top1.5_R, top1.5_S) %>% unique()
+
+
+keep.notes <- "FGFR_SIGNALING"
+not.keep <- c("REACTOME_SPRY_REGULATION_OF_FGF_SIGNALING")
+top1.6_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 1) %>% 
+  #filter(!Gene_Set %in% not.keep) %>% 
+  #dplyr::arrange(desc(Estimate)) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#Filter post treatment results
+top1.6_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR)  %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top1.6 <- c(top1.6_R, top1.6_S) %>% unique() 
+
+
+#Merge all GF
+top1 <- c(top1.2, top1.3, top1.4, top1.5, top1.6) %>% na.omit()
+
+#GPCR_SIGNALING
+keep <- c("GPCR_SIGNALING")
+
+GPCR_SIGNALING_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+GPCR_SIGNALING_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+not.keep <- c("REACTOME_ADORA2B_MEDIATED_ANTI_INFLAMMATORY_CYTOKINES_PRODUCTION")
+top3_R <- stateR2 %>% 
+  filter(metaphenotype == keep) %>%
+  filter(!Gene_Set %in% not.keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top3_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+GPCR_SIGNALING <- c(GPCR_SIGNALING_R, GPCR_SIGNALING_S) %>% unique()
+top3 <- c(top3_R, top3_S) %>% unique() %>% .[1:3]
+
+
+keep <- c("IMMUNE_RESPONSE")
+IMMUNE_RESPONSE_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+IMMUNE_RESPONSE_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#notes.keep2 <- c("REACTOME_SIGNALING_BY_HEDGEHOG", "KEGG_WNT_SIGNALING_PATHWAY",
+#                 "HALLMARK_NOTCH_SIGNALING", "REACTOME_HEDGEHOG_ON_STATE",
+#                 "HALLMARK_HEDGEHOG_SIGNALING")
+
+not.keep <- c("REACTOME_CYTOSOLIC_SENSORS_OF_PATHOGEN_ASSOCIATED_DNA")
+
+top2_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 3) %>% 
+  filter(!Gene_Set %in% not.keep) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top2_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 3) %>% 
+  filter(!Gene_Set %in% not.keep) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+IMMUNE_RESPONSE <- c(IMMUNE_RESPONSE_R, IMMUNE_RESPONSE_S) %>% unique()
+top2 <- c(top2_R, top2_S) %>% unique() %>% .[1:3]
+
+
+#METABOLISM
+keep <- c("METABOLISM")
+METABOLISM_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+METABOLISM_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+not.keep <- c("KEGG_MELANOGENESIS", "HYPERTROPHIC_CARDIOMYOPATHY_HCM")
+top12_R <- stateR2 %>% 
+  filter(!Gene_Set %in% not.keep) %>% 
+  filter(metaphenotype == keep) %>%
+  dplyr::arrange(enriched, Estimate) %>%
+  slice_head(n = 3) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep.gs <- c("REACTOME_FATTY_ACID_METABOLISM", "KEGG_ARGININE_AND_PROLINE_METABOLISM",
+            "KEGG_FATTY_ACID_METABOLISM", "REACTOME_SULFUR_AMINO_ACID_METABOLISM", 
+            "KEGG_DRUG_METABOLISM_CYTOCHROME_P450", "HALLMARK_FATTY_ACID_METABOLISM",
+             "HALLMARK_XENOBIOTIC_METABOLISM", 
+             "KEGG_METABOLISM_OF_XENOBIOTICS_BY_CYTOCHROME_P450")
+top12_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep,
+                Gene_Set %in% keep.gs) %>%
+  #dplyr::arrange(enriched, Estimate) %>%
+  #slice_tail(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character() %>% .[1:5]
+
+METABOLISM <- c(METABOLISM_R, METABOLISM_S) %>% unique()
+top12 <- c(top12_R, top12_S) %>% unique() 
+
+
+#ORGANELLE_BIOGENESIS
+keep <- c("ORGANELLE_BIOGENESIS")
+ORGANELLE_BIOGENESIS_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ORGANELLE_BIOGENESIS_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+ORGANELLE_BIOGENESIS <- c(ORGANELLE_BIOGENESIS_R, 
+                  ORGANELLE_BIOGENESIS_S) %>% unique()
+
+
+#POST.TRANSLATION_MODIFICATION
+keep <- c("POST.TRANSLATION_MODIFICATION")
+POST.TRANSLATION_MODIFICATION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+POST.TRANSLATION_MODIFICATION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+POST.TRANSLATION_MODIFICATION <- c(POST.TRANSLATION_MODIFICATION_R, 
+                  POST.TRANSLATION_MODIFICATION_S) %>% unique()
+
+
+#PROTEIN_LOCALIZATION
+keep <- c("PROTEIN_LOCALIZATION")
+PROTEIN_LOCALIZATION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+PROTEIN_LOCALIZATION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+PROTEIN_LOCALIZATION <- c(PROTEIN_LOCALIZATION_R, 
+                  PROTEIN_LOCALIZATION_S) %>% unique()
+
+
+#RHO_GTPASE_SIGNALING
+keep <- c("RHO_GTPASE_SIGNALING")
+RHO_GTPASE_SIGNALING_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+RHO_GTPASE_SIGNALING_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+top13_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 3) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top13_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+RHO_GTPASE_SIGNALING <- c(RHO_GTPASE_SIGNALING_R, RHO_GTPASE_SIGNALING_S) %>% unique()
+top13 <- c(top13_R, top13_S) %>% unique %>% .[1:3]
+
+
+
+#RNA_PROCESSING
+keep <- c("RNA_PROCESSING")
+RNA_PROCESSING_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+RNA_PROCESSING_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+RNA_PROCESSING <-c(RNA_PROCESSING_R, RNA_PROCESSING_S) %>% unique()
+
+
+#SENSOTRY_PERCEPTION
+keep <- c("SENSORY_PERCEPTION")
+SENSORY_PERCEPTION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SENSORY_PERCEPTION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SENSORY_PERCEPTION <-c(SENSORY_PERCEPTION_R, SENSORY_PERCEPTION_S) %>% unique()
+
+
+#SLC.MEDIATED_TRANSPORT
+keep <- c("SLC.MEDIATED_TRANSPORT")
+SLC.MEDIATED_TRANSPORT_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SLC.MEDIATED_TRANSPORT_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SLC.MEDIATED_TRANSPORT <-c(SLC.MEDIATED_TRANSPORT_R, SLC.MEDIATED_TRANSPORT_S) %>% unique()
+
+
+#Stress response
+keep <- c("STRESS_RESPONSE")
+STRESS_RESPONSE_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+STRESS_RESPONSE_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#top8_R <- stateR2 %>% 
+#  dplyr::filter(metaphenotype == keep) %>%
+#  dplyr::arrange(FDR) %>%
+#  pull(Gene_Set) %>%
+#  as.character()
+
+#top8_S <- stateS2 %>% 
+#  dplyr::filter(metaphenotype == keep) %>%
+#  dplyr::arrange(FDR) %>%
+#  slice_head(n = 5) %>% 
+#  pull(Gene_Set) %>%
+#  as.character()
+
+STRESS_RESPONSE <- c(STRESS_RESPONSE_R, STRESS_RESPONSE_S) %>% unique()
+#top8 <- c(top8_R, top8_S) %>% unique() %>% .[1:2]
+
+
+#SYNAPTIC_TRANSMISSION
+keep <- c("SYNAPTIC_TRANSMISSION")
+SYNAPTIC_TRANSMISSION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SYNAPTIC_TRANSMISSION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+SYNAPTIC_TRANSMISSION <-c(SYNAPTIC_TRANSMISSION_R, SYNAPTIC_TRANSMISSION_S) %>% unique()
+
+
+#TF_ACTIVITY
+keep <- c("TF_ACTIVITY")
+TF_ACTIVITY_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+TF_ACTIVITY_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top5_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 3) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top5_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+TF_ACTIVITY <- c(TF_ACTIVITY_R, TF_ACTIVITY_S) %>% unique()
+top5 <- c(top5_R, top5_S) %>% unique %>% .[1:2]
+
+
+#TP53_SIGNALING
+keep <- c("TP53_SIGNALING")
+TP53_SIGNALING_R <- stateR2 %>% 
+  filter(!Gene_Set %in% c(paste0("REACTOME_TP53_REGULATES_TRANSCRIPTION_OF_",
+                                 "ADDITIONAL_CELL_CYCLE_GENES_WHOSE_EXACT_ROLE_",
+                                 "IN_THE_P53_PATHWAY_REMAIN_UNCERTAIN"))) %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+TP53_SIGNALING_S <- stateS2 %>% 
+  filter(!Gene_Set %in% c(paste0("REACTOME_TP53_REGULATES_TRANSCRIPTION_OF_",
+                                 "ADDITIONAL_CELL_CYCLE_GENES_WHOSE_EXACT_ROLE_",
+                                 "IN_THE_P53_PATHWAY_REMAIN_UNCERTAIN"))) %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top7_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top7_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+TP53_SIGNALING <- c(TP53_SIGNALING_R, TP53_SIGNALING_S) %>% unique()
+top7 <- c(top7_R, top7_S) %>% unique %>% .[1:2]
+
+
+
+#TRANSCRIPTION
+keep <- c("TRANSCRIPTION")
+TRANSCRIPTION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSCRIPTION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSCRIPTION <-c(TRANSCRIPTION_R, TRANSCRIPTION_S) %>% unique()
+
+
+
+#TRANSFERRIN.MEDIATED_TRANSPORT
+keep <- c("TRANSFERRIN.MEDIATED_TRANSPORT")
+TRANSFERRIN.MEDIATED_TRANSPORT_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSFERRIN.MEDIATED_TRANSPORT_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSFERRIN.MEDIATED_TRANSPORT <-c(TRANSFERRIN.MEDIATED_TRANSPORT_R, 
+                                   TRANSFERRIN.MEDIATED_TRANSPORT_S) %>% unique()
+
+
+#TRANSLATION
+keep <- c("TRANSLATION")
+TRANSLATION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSLATION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+TRANSLATION <-c(TRANSLATION_R, TRANSLATION_S) %>% unique()
+
+
+
+#VESICLE.MEDIATED.MEDIATED_TRANSPORT
+keep <- c("VESICLE.MEDIATED_TRANSPORT")
+VESICLE.MEDIATED_TRANSPORT_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+VESICLE.MEDIATED_TRANSPORT_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+VESICLE.MEDIATED_TRANSPORT <-c(VESICLE.MEDIATED_TRANSPORT_R, 
+                                   VESICLE.MEDIATED_TRANSPORT_S) %>% unique()
+
+
+.f = function() { 
+#STEMNESS
+keep <- c("STEMNESS")
+STEMNESS_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+STEMNESS_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+g.keep <- c("HALLMARK_NOTCH_SIGNALING", "KEGG_WNT_SIGNALING_PATHWAY",
+            "REACTOME_NOTCH4_INTRACELLULAR_DOMAIN_REGULATES_TRANSCRIPTION")
+top4_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep,
+                Gene_Set %in% g.keep) %>%
+  #dplyr::arrange(FDR) %>%
+  #slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top4_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+STEMNESS <- c(STEMNESS_R, STEMNESS_S) %>% unique()
+top4 <- c(top4_R, top4_S) %>% unique() %>% .[1:3]
+
+
+
+#CELL_MIGRATION
+keep <- c("CELL_MIGRATION")
+CELL_MIGRATION_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_MIGRATION_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top6_R <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+top6_S <- stateS2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(FDR) %>%
+  slice_head(n = 5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+CELL_MIGRATION <- c(CELL_MIGRATION_R, CELL_MIGRATION_S) %>% unique()
+top6 <- c(
+          #top6_R, 
+          top6_S
+          ) %>% 
+  unique()
+
+}
+
+
+#Put gene sets in order and match to matrix
+ord <- c(GF_SIGNALING, IMMUNE_RESPONSE, GPCR_SIGNALING, TRANSCRIPTION,
+         TP53_SIGNALING, SENSORY_PERCEPTION, ANTI.APOPTOSIS,
+         TRANSFERRIN.MEDIATED_TRANSPORT, SYNAPTIC_TRANSMISSION, PROTEIN_LOCALIZATION,
+         AQUAPORIN.MEDIATED_TRANSPORT, VESICLE.MEDIATED_TRANSPORT,
+         SLC.MEDIATED_TRANSPORT, ECM_ORGANIZATION, TF_ACTIVITY, 
+         
+         
+         CELL_CYCLE, METABOLISM, RNA_PROCESSING, RHO_GTPASE_SIGNALING,
+         ER_GOLGI_TRANSPORT, POST.TRANSLATION_MODIFICATION, 
+         ORGANELLE_BIOGENESIS,DNA_REPAIR, APOPTOSIS, TRANSLATION, 
+         CELL_JUNCTION, STRESS_RESPONSE, AXON_GUIDANCE)
+
+heat2 <- heat2[match(ord, rownames(heat2)),]
+
+#Get T/F matrix for all gene sets in selected meta phenotypes for sub-heatmaps
+## Colors all gene-sets according to meta-phenotype
+ANTI.APOPTOSIS_1 <- rownames(heat2) %in% ANTI.APOPTOSIS
+APOPTOSIS_1 <- rownames(heat2) %in% APOPTOSIS
+AQUAPORIN.MEDIATED_TRANSPORT_1 <- rownames(heat2) %in% AQUAPORIN.MEDIATED_TRANSPORT
+AXON_GUIDANCE_1 <- rownames(heat2) %in% AXON_GUIDANCE
+CELL_CYCLE_1 <- rownames(heat2) %in% CELL_CYCLE
+CELL_JUNCTION_1 <- rownames(heat2) %in% CELL_JUNCTION
+DNA_REPAIR_1 <- rownames(heat2) %in% DNA_REPAIR
+ECM_ORGANIZATION_1 <- rownames(heat2) %in% ECM_ORGANIZATION
+ER_GOLGI_TRANSPORT_1 <- rownames(heat2) %in% ER_GOLGI_TRANSPORT
+GF_SIGNALING_1 <- rownames(heat2) %in% GF_SIGNALING
+GPCR_SIGNALING_1 <- rownames(heat2) %in% GPCR_SIGNALING
+IMMUNE_RESPONSE_1 <- rownames(heat2) %in% IMMUNE_RESPONSE
+METABOLISM_1 <- rownames(heat2) %in% METABOLISM
+ORGANELLE_BIOGENESIS_1 <- rownames(heat2) %in% ORGANELLE_BIOGENESIS
+POST.TRANSLATION_MODIFICATION_1 <- rownames(heat2) %in% POST.TRANSLATION_MODIFICATION
+PROTEIN_LOCALIZATION_1 <- rownames(heat2) %in% PROTEIN_LOCALIZATION
+RHO_GTPASE_SIGNALING_1 <- rownames(heat2) %in% RHO_GTPASE_SIGNALING
+RNA_PROCESSING_1 <- rownames(heat2) %in% RNA_PROCESSING
+SENSORY_PERCEPTION_1 <- rownames(heat2) %in% SENSORY_PERCEPTION
+SLC.MEDIATED_TRANSPORT_1 <- rownames(heat2) %in% SLC.MEDIATED_TRANSPORT
+STRESS_RESPONSE_1 <- rownames(heat2) %in% STRESS_RESPONSE
+SYNAPTIC_TRANSMISSION_1 <- rownames(heat2) %in% SYNAPTIC_TRANSMISSION
+TF_ACTIVITY_1 <- rownames(heat2) %in% TF_ACTIVITY
+TP53_SIGNALING_1 <- rownames(heat2) %in% TP53_SIGNALING
+TRANSCRIPTION_1 <- rownames(heat2) %in% TRANSCRIPTION
+TRANSFERRIN.MEDIATED_TRANSPORT_1 <- rownames(heat2) %in% TRANSFERRIN.MEDIATED_TRANSPORT
+TRANSLATION_1 <- rownames(heat2) %in% TRANSLATION
+VESICLE.MEDIATED_TRANSPORT_1 <- rownames(heat2) %in% VESICLE.MEDIATED_TRANSPORT
+
+
+
+#Merge all gene set names that will be labeled
+top.merg <- c(top1, top2, top3, 
+              #top4, 
+              top5, 
+              #top6, 
+              top7, 
+              #top8, 
+              top9, top10, top11, top12, top13)
+#top.merg <- top1
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene_Set = rownames(heat2))
+
+#Get gene sets and respective meta phenotypes
+tmp.2_R <- stateR2 %>%
+  dplyr::filter(Gene_Set %in% tmp.$Gene_Set) %>%
+  dplyr::select(Gene_Set, metaphenotype)
+
+tmp.2_S <- stateS2 %>%
+  dplyr::filter(Gene_Set %in% tmp.$Gene_Set) %>%
+  dplyr::select(Gene_Set, metaphenotype)
+
+tmp.2 <- tmp.2_R %>% 
+  full_join(tmp.2_S) %>% 
+  unique()
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  left_join(tmp.2) %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "AQUAPORIN.MEDIATED_TRANSPORT", "#006400",
+                      ifelse(metaphenotype == "AXON_GUIDANCE", "#9DFFFF",
+                      ifelse(metaphenotype == "CELL_CYCLE",  "#8B5A00",
+                      ifelse(metaphenotype == "CELL_JUNCTION", "#D66621",
+                      ifelse(metaphenotype == "DNA_REPAIR", "#B6534E",
+                      ifelse(metaphenotype == "ECM_ORGANIZATION", "#C99546",
+                      ifelse(metaphenotype == "ER_GOLGI_TRANSPORT", "#99DA00",
+                      ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "#90EE90",
+                      ifelse(metaphenotype == "IMMUNE_RESPONSE",  "#008B8B",
+                      ifelse(metaphenotype == "METABOLISM", "#FFB6C1",
+                      ifelse(metaphenotype == "ORGANELLE_BIOGENESIS", "#E3767B",
+                      ifelse(metaphenotype == "POST.TRANSLATION_MODIFICATION", "#ABC083",
+                      ifelse(metaphenotype == "PROTEIN_LOCALIZATION", "#75B33A",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "#FFA500",
+                      ifelse(metaphenotype == "RNA_PROCESSING", "#EEE8CD",
+                      ifelse(metaphenotype == "SENSORY_PERCEPTION", "#FCD3BC",
+                      ifelse(metaphenotype == "SLC.MEDIATED_TRANSPORT", "#6CC5CC",
+                      ifelse(metaphenotype == "STRESS_RESPONSE", "#8093E3",
+                      ifelse(metaphenotype == "SYNAPTIC_TRANSMISSION", "#00CC7C",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "#EE7AE9",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "#CD1076",
+                      ifelse(metaphenotype == "TRANSCRIPTION", "#FFFF00",
+                      ifelse(metaphenotype == "TRANSFERRIN.MEDIATED_TRANSPORT",
+                             "#DC7C00",
+                      ifelse(metaphenotype == "TRANSLATION", "#FEC857",
+                      ifelse(metaphenotype == "VESICLE.MEDIATED_TRANSPORT", 
+                             "#85BEBD",
+                             
+                             
+                      #ifelse(metaphenotype == "CELL_MIGRATION", "#BC8F8F",
+                      #ifelse(metaphenotype == "CLATHRIN.MEDIATED_TRANSPORT", 
+                      #          "#80D3B7",
+                      #ifelse(metaphenotype == "STEMNESS", "#FDB781",
+                      #ifelse(metaphenotype == "RNA_PROCESSING", "#FFA1E2",
+                      #ifelse(metaphenotype == "DISEASE", "#EDD8A6", 
+                      #ifelse(metaphenotype == "GAGs_SYNTHESIS", "#D1A65A",
+                      ""))))))))))))))))))))))))))))) %>% 
+  pull(color) %>%
+  as.character()
+
+fsize <- 9
+
+#MAKE HEATMAP
+hmapGSEA <- Heatmap(heat2,
+        name = "Enrichment", 
+        col = myCol,
+        #column_title = GetoptLong::qq("Enrichment Scores for @{nrow(heat2)} Pathways"),
+        #column_title = GetoptLong::qq(""),
+        top_annotation = column_ha,
+        column_title_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5),
+        cluster_columns = F,
+        #cluster_rows = as.dendrogram(d),
+        #column_names_gp = gpar(fontsize = 12),
+        show_row_names = F,
+        show_column_dend = F,
+        show_column_names = F,
+        column_split = c(rep(1:4, each = 9)),
+        column_gap = unit(2, "mm"),
+        row_split = c(rep(1, each = length(GF_SIGNALING)), 
+                      rep(2, each = length(IMMUNE_RESPONSE)), 
+                      rep(3, each = length(GPCR_SIGNALING)), 
+                      rep(4, each = length(TRANSCRIPTION)), 
+                      rep(5, each = length(TP53_SIGNALING)),
+                      rep(6, each = length(SENSORY_PERCEPTION)),
+                      rep(7, each = length(ANTI.APOPTOSIS)),
+                      rep(8, each = length(TRANSFERRIN.MEDIATED_TRANSPORT)),
+                      rep(9, each = length(SYNAPTIC_TRANSMISSION)),
+                      rep(10, each = length(PROTEIN_LOCALIZATION)),
+                      rep(11, each = length(AQUAPORIN.MEDIATED_TRANSPORT)),
+                      rep(12, each = length(VESICLE.MEDIATED_TRANSPORT)),
+                      rep(13, each = length(SLC.MEDIATED_TRANSPORT)),
+                      rep(14, each = length(ECM_ORGANIZATION)),
+                      rep(15, each = length(TF_ACTIVITY)),
+                      rep(16, each = length(CELL_CYCLE)),
+                      rep(17, each = length(METABOLISM)),
+                      rep(18, each = length(RNA_PROCESSING)),
+                      rep(19, each = length(RHO_GTPASE_SIGNALING)),
+                      rep(20, each = length(ER_GOLGI_TRANSPORT)),
+                      rep(21, each = length(POST.TRANSLATION_MODIFICATION)),
+                      rep(22, each = length(ORGANELLE_BIOGENESIS)),
+                      rep(23, each = length(DNA_REPAIR)),
+                      rep(24, each = length(APOPTOSIS)),
+                      rep(25, each = length(TRANSLATION)),
+                      rep(26, each = length(CELL_JUNCTION)),
+                      rep(27, each = length(STRESS_RESPONSE)),
+                      rep(28, each = length(AXON_GUIDANCE))
+                      ),
+        row_gap = unit(2, "mm"),
+        cluster_rows = F,
+        row_names_centered = T,
+        heatmap_legend_param = list(labels_gp = gpar(fontsize = 9),
+                                    title_gp = gpar(fontsize = 9),
+                                    legend_height = unit(1.5, "mm")),
+        raster_device = "tiff") +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 9, col = tmp.3, fontface = "bold"),
+        padding = unit(2.5, "mm")),
+        annotation_name_rot = 45) +
+  Heatmap(GF_SIGNALING_1 + 0,
+          name = "GF_SIGNALING", col = c("0" = "white", "1" = "#ef3b2c"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ef3b2c",
+                                 fontface = "bold"), 
+          column_names_rot = 30) +
+  Heatmap(IMMUNE_RESPONSE_1 + 0,
+          name = "IMMUNE_RESPONSE ", col = c("0" = "white", "1" = "#008B8B"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "cyan4",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(GPCR_SIGNALING_1 + 0,
+          name = "GPCR_SIGNALING", col = c("0" = "white", "1" = "#90EE90"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = 9, col = "#90EE90",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TRANSCRIPTION_1 + 0,
+          name = "TRANSCRIPTION", col = c("0" = "white", "1" = "#FFFF00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FFFF00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TP53_SIGNALING_1 + 0,
+          name = "TP53_SIGNALING", col = c("0" = "white", "1" = "#CD1076"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#CD1076",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SENSORY_PERCEPTION_1 + 0,
+          name = "SENSORY_PERCEPTION", col = c("0" = "white", "1" = "#FCD3BC"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FCD3BC",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ANTI.APOPTOSIS_1 + 0, 
+          name = "ANTI.APOPTOSIS", col = c("0" = "white", "1" = "#4A1486"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#4A1486",
+                                 fontface = "bold"), column_names_rot = 30) +
+    Heatmap(TRANSFERRIN.MEDIATED_TRANSPORT_1 + 0, 
+          name = "TRANSFERRIN.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#DC7C00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#DC7C00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SYNAPTIC_TRANSMISSION_1 + 0, 
+          name = "SYNAPTIC_TRANSMISSION", col = c("0" = "white", "1" = "#00CC7C"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#00CC7C",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(PROTEIN_LOCALIZATION_1 + 0, 
+          name = "PROTEIN_LOCALIZATION", col = c("0" = "white", "1" = "#75B33A"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#75B33A",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(AQUAPORIN.MEDIATED_TRANSPORT_1 + 0, 
+          name = "AQUAPORIN.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#006400"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#006400",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(VESICLE.MEDIATED_TRANSPORT_1 + 0, 
+          name = "VESICLE.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#85BEBD"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#85BEBD",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SLC.MEDIATED_TRANSPORT_1 + 0, 
+          name = "SLC.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#6CC5CC"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#6CC5CC",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ECM_ORGANIZATION_1 + 0, 
+          name = "ECM_ORGANIZATION", col = c("0" = "white", "1" = "#C99546"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#C99546",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TF_ACTIVITY_1 + 0,
+          name = "TF_ACTIVITY", col = c("0" = "white", "1" = "#EE7AE9"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#EE7AE9",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_CYCLE_1 + 0, 
+          name = "CELL_CYCLE", col = c("0" = "white", "1" = "#8B5A00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8B5A00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(METABOLISM_1 + 0,
+          name = "METABOLISM", col = c("0" = "white", "1" = "#FFB6C1"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FFB6C1",
+                                 fontface = "bold"), column_names_rot = 30) +
+    Heatmap(RNA_PROCESSING_1 + 0,
+          name = "RNA_PROCESSING", col = c("0" = "white", "1" = "#EEE8CD"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#EEE8CD",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(RHO_GTPASE_SIGNALING_1 + 0,
+          name = "RHO_GTPASE_SIGNALING", col = c("0" = "white", "1" = "#FFA500"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orange",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ER_GOLGI_TRANSPORT_1 + 0,
+          name = "ER_GOLGI_TRANSPORT", col = c("0" = "white", "1" = "#99DA00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#99DA00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(POST.TRANSLATION_MODIFICATION_1 + 0,
+          name = "POST.TRANSLATION_MODIFICATION", col = c("0" = "white", "1" = "#ABC083"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ABC083",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ORGANELLE_BIOGENESIS_1 + 0,
+          name = "ORGANELLE_BIOGENESIS", col = c("0" = "white", "1" = "#E3767B"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#E3767B",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(DNA_REPAIR_1 + 0,
+          name = "DNA_REPAIR", col = c("0" = "white", "1" = "#B6534E"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#B6534E",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(APOPTOSIS_1 + 0, 
+          name = "APOPTOSIS", col = c("0" = "white", "1" = "#0570b0"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#0570b0",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TRANSLATION_1 + 0, 
+          name = "TRANSLATION", col = c("0" = "white", "1" = "#FEC857"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FEC857",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_JUNCTION_1 + 0, 
+          name = "CELL_JUNCTION", col = c("0" = "white", "1" = "#D66621"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#D66621",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(STRESS_RESPONSE_1 + 0,
+          name = "STRESS_RESPONSE", col = c("0" = "white", "1" = "#8093E3"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8093E3",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(AXON_GUIDANCE_1 + 0,
+          name = "AXON_GUIDANCE", col = c("0" = "white", "1" = "#9DFFFF"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#9DFFFF",
+                                 fontface = "bold"), column_names_rot = 30)
+
+#HEAT MAP WITHOUT ROW NAMES
+hmapGSEA1 <- Heatmap(heat2,
+        name = "Enrichment", 
+        col = myCol,
+        #column_title = GetoptLong::qq("Enrichment Scores for @{nrow(heat2)} Pathways"),
+        #column_title = GetoptLong::qq(""),
+        top_annotation = column_ha,
+        column_title_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5),
+        cluster_columns = F,
+        #cluster_rows = as.dendrogram(d),
+        #column_names_gp = gpar(fontsize = 12),
+        show_row_names = F,
+        show_column_dend = F,
+        show_column_names = F,
+        column_split = c(rep(1:4, each = 9)),
+        column_gap = unit(2, "mm"),
+        row_split = c(rep(1, each = length(GF_SIGNALING)), 
+                      rep(2, each = length(IMMUNE_RESPONSE)), 
+                      rep(3, each = length(GPCR_SIGNALING)), 
+                      rep(4, each = length(TRANSCRIPTION)), 
+                      rep(5, each = length(TP53_SIGNALING)),
+                      rep(6, each = length(SENSORY_PERCEPTION)),
+                      rep(7, each = length(ANTI.APOPTOSIS)),
+                      rep(8, each = length(TRANSFERRIN.MEDIATED_TRANSPORT)),
+                      rep(9, each = length(SYNAPTIC_TRANSMISSION)),
+                      rep(10, each = length(PROTEIN_LOCALIZATION)),
+                      rep(11, each = length(AQUAPORIN.MEDIATED_TRANSPORT)),
+                      rep(12, each = length(VESICLE.MEDIATED_TRANSPORT)),
+                      rep(13, each = length(SLC.MEDIATED_TRANSPORT)),
+                      rep(14, each = length(ECM_ORGANIZATION)),
+                      rep(15, each = length(TF_ACTIVITY)),
+                      rep(16, each = length(CELL_CYCLE)),
+                      rep(17, each = length(METABOLISM)),
+                      rep(18, each = length(RNA_PROCESSING)),
+                      rep(19, each = length(RHO_GTPASE_SIGNALING)),
+                      rep(20, each = length(ER_GOLGI_TRANSPORT)),
+                      rep(21, each = length(POST.TRANSLATION_MODIFICATION)),
+                      rep(22, each = length(ORGANELLE_BIOGENESIS)),
+                      rep(23, each = length(DNA_REPAIR)),
+                      rep(24, each = length(APOPTOSIS)),
+                      rep(25, each = length(TRANSLATION)),
+                      rep(26, each = length(CELL_JUNCTION)),
+                      rep(27, each = length(STRESS_RESPONSE)),
+                      rep(28, each = length(AXON_GUIDANCE))
+                      ),
+        row_gap = unit(2, "mm"),
+        cluster_rows = F,
+        row_names_centered = T,
+        heatmap_legend_param = list(labels_gp = gpar(fontsize = 9),
+                                    title_gp = gpar(fontsize = 9),
+                                    legend_height = unit(1.5, "mm")),
+        raster_device = "tiff") +
+  Heatmap(GF_SIGNALING_1 + 0,
+          name = "GF_SIGNALING", col = c("0" = "white", "1" = "#ef3b2c"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ef3b2c",
+                                 fontface = "bold"), 
+          column_names_rot = 30) +
+  Heatmap(IMMUNE_RESPONSE_1 + 0,
+          name = "IMMUNE_RESPONSE ", col = c("0" = "white", "1" = "#008B8B"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "cyan4",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(GPCR_SIGNALING_1 + 0,
+          name = "GPCR_SIGNALING", col = c("0" = "white", "1" = "#90EE90"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = 9, col = "#90EE90",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TRANSCRIPTION_1 + 0,
+          name = "TRANSCRIPTION", col = c("0" = "white", "1" = "#FFFF00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FFFF00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TP53_SIGNALING_1 + 0,
+          name = "TP53_SIGNALING", col = c("0" = "white", "1" = "#CD1076"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#CD1076",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SENSORY_PERCEPTION_1 + 0,
+          name = "SENSORY_PERCEPTION", col = c("0" = "white", "1" = "#FCD3BC"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FCD3BC",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ANTI.APOPTOSIS_1 + 0, 
+          name = "ANTI.APOPTOSIS", col = c("0" = "white", "1" = "#4A1486"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#4A1486",
+                                 fontface = "bold"), column_names_rot = 30) +
+    Heatmap(TRANSFERRIN.MEDIATED_TRANSPORT_1 + 0, 
+          name = "TRANSFERRIN.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#DC7C00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#DC7C00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SYNAPTIC_TRANSMISSION_1 + 0, 
+          name = "SYNAPTIC_TRANSMISSION", col = c("0" = "white", "1" = "#00CC7C"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#00CC7C",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(PROTEIN_LOCALIZATION_1 + 0, 
+          name = "PROTEIN_LOCALIZATION", col = c("0" = "white", "1" = "#75B33A"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#75B33A",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(AQUAPORIN.MEDIATED_TRANSPORT_1 + 0, 
+          name = "AQUAPORIN.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#006400"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#006400",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(VESICLE.MEDIATED_TRANSPORT_1 + 0, 
+          name = "VESICLE.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#85BEBD"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#85BEBD",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(SLC.MEDIATED_TRANSPORT_1 + 0, 
+          name = "SLC.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#6CC5CC"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#6CC5CC",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ECM_ORGANIZATION_1 + 0, 
+          name = "ECM_ORGANIZATION", col = c("0" = "white", "1" = "#C99546"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#C99546",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TF_ACTIVITY_1 + 0,
+          name = "TF_ACTIVITY", col = c("0" = "white", "1" = "#EE7AE9"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#EE7AE9",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_CYCLE_1 + 0, 
+          name = "CELL_CYCLE", col = c("0" = "white", "1" = "#8B5A00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8B5A00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(METABOLISM_1 + 0,
+          name = "METABOLISM", col = c("0" = "white", "1" = "#FFB6C1"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FFB6C1",
+                                 fontface = "bold"), column_names_rot = 30) +
+    Heatmap(RNA_PROCESSING_1 + 0,
+          name = "RNA_PROCESSING", col = c("0" = "white", "1" = "#EEE8CD"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#EEE8CD",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(RHO_GTPASE_SIGNALING_1 + 0,
+          name = "RHO_GTPASE_SIGNALING", col = c("0" = "white", "1" = "#FFA500"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orange",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ER_GOLGI_TRANSPORT_1 + 0,
+          name = "ER_GOLGI_TRANSPORT", col = c("0" = "white", "1" = "#99DA00"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#99DA00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(POST.TRANSLATION_MODIFICATION_1 + 0,
+          name = "POST.TRANSLATION_MODIFICATION", col = c("0" = "white", "1" = "#ABC083"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ABC083",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ORGANELLE_BIOGENESIS_1 + 0,
+          name = "ORGANELLE_BIOGENESIS", col = c("0" = "white", "1" = "#E3767B"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#E3767B",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(DNA_REPAIR_1 + 0,
+          name = "DNA_REPAIR", col = c("0" = "white", "1" = "#B6534E"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#B6534E",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(APOPTOSIS_1 + 0, 
+          name = "APOPTOSIS", col = c("0" = "white", "1" = "#0570b0"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#0570b0",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TRANSLATION_1 + 0, 
+          name = "TRANSLATION", col = c("0" = "white", "1" = "#FEC857"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FEC857",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_JUNCTION_1 + 0, 
+          name = "CELL_JUNCTION", col = c("0" = "white", "1" = "#D66621"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#D66621",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(STRESS_RESPONSE_1 + 0,
+          name = "STRESS_RESPONSE", col = c("0" = "white", "1" = "#8093E3"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8093E3",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(AXON_GUIDANCE_1 + 0,
+          name = "AXON_GUIDANCE", col = c("0" = "white", "1" = "#9DFFFF"),
+          show_heatmap_legend = F, width = unit(4, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#9DFFFF",
+                                 fontface = "bold"), column_names_rot = 30)
+
+#Make stacked bar plot for GF signaling sub metaphenotypes
+tmp <- lmeResults %>% 
+  filter(FDR <= 0.05,
+         coefficient %in% c("stateeverR", "statesen"),
+         metaphenotype == "GF_SIGNALING") %>% 
+  select(Gene_Set, coefficient, path.info_1, path.info_2, comparison, 
+         enriched, metaphenotype, metaphenotype_2)
+  
+table(tmp$metaphenotype_2)
+
+
+keep <- c("sen.DMSO", "everR.DMSO", "sen.ever", "everR.ever")
+tmp1 <- tmp %>% 
+  filter(enriched %in% keep[1])
+tmp2 <- table(tmp1$metaphenotype_2) %>% 
+  as.data.frame() %>% 
+  rename("metaphenotype_2" = "Var1") %>% 
+  mutate(enriched = "sen.DMSO")
+tmp2
+
+tmp3 <- tmp %>% 
+  filter(enriched %in% keep[2])
+tmp4 <- table(tmp3$metaphenotype_2) %>% 
+  as.data.frame() %>% 
+  rename("metaphenotype_2" = "Var1") %>% 
+  mutate(enriched = "everR.DMSO")
+tmp4
+
+tmp5 <- tmp %>% 
+  filter(enriched %in% keep[3])
+tmp6 <- table(tmp5$metaphenotype_2) %>% 
+  as.data.frame() %>% 
+  rename("metaphenotype_2" = "Var1") %>% 
+  mutate(enriched = "sen.ever")
+tmp6
+
+tmp7 <- tmp %>% 
+  filter(enriched %in% keep[4])
+tmp8 <- table(tmp7$metaphenotype_2) %>% 
+  as.data.frame() %>% 
+  rename("metaphenotype_2" = "Var1") %>% 
+  mutate(enriched = "everR.ever")
+tmp8
+
+tmp5 <- tmp2 %>% 
+  full_join(tmp4, by = colnames(.)) %>% 
+  full_join(tmp6, by = colnames(.)) %>% 
+  full_join(tmp8, by = colnames(.)) %>% 
+  mutate_at(vars(enriched), factor)
+  
+
+#Get colors
+col.m <- sample(colors(), 34, replace = F) %>% 
+   as.data.frame()
+
+#Plot
+meta.stack <- tmp5 %>% 
+  mutate(enriched = ordered(enriched, levels = c("sen.DMSO","everR.DMSO", 
+                                                 "sen.ever", "everR.ever"))) %>% 
+  mutate(label = ifelse(metaphenotype_2 == "ESTROGEN_SIGNALING","ESTROGEN_SIGNALING",
+                 ifelse(metaphenotype_2 == "INSULIN_SIGNALING", "INSULIN_SIGNALING",
+                 ifelse(metaphenotype_2 == "MAPK_SIGNALING", "MAPK_SIGNALING",
+                 ifelse(metaphenotype_2 == "MTOR_SIGNALING","MTOR_SIGNALING",
+                 ifelse(metaphenotype_2 == "ERBB_SIGNALING","ERBB_SIGNALING",
+                 ifelse(metaphenotype_2 == "FGFR_SIGNALING","FGFR_SIGNALING",
+                 ifelse(metaphenotype_2 == "RAS_SIGNALING","RAS_SIGNALING",
+                 
+                        "")))))))) %>% 
+  mutate(Cell_State = ifelse(enriched == "sen.DMSO", "Sensitive in \n DMSO",
+                      ifelse(enriched == "everR.DMSO", "EverR in \n DMSO",
+                      ifelse(enriched == "sen.ever", "Sensitive in \n Everolimus",
+                      ifelse(enriched == "everR.ever", "EverR in \n Everolimus",
+                             "error"))))) %>% 
+  mutate(Cell_State = ordered(Cell_State, levels = c("Sensitive in \n DMSO",
+                                                 "EverR in \n DMSO", 
+                                                 "Sensitive in \n Everolimus",
+                                                 "EverR in \n Everolimus"))) %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype_2, abs(desc(Freq)))) %>% 
+  ggplot(mapping = aes(x = Cell_State, y = Freq,  fill = metaphenotype_2)) +
+  geom_bar(position = "stack", stat = "identity") +
+  scale_fill_manual(values = c("lightsalmon1", "yellow", "gold2", "lightgoldenrod",
+                               "red", "paleturquoise1", "green2",
+                               "cornsilk3", "lightgoldenrod1",  "firebrick2",
+                               "saddlebrown",
+                               "grey38", "turquoise", "firebrick3",
+                               "deeppink4", "lightcyan2", "coral1","lightcyan3",    
+                               "gray82","maroon", "lightblue2","gray13",
+                               "hotpink3","mistyrose2","slategray3","azure3",
+                               "cyan4","gray68","palegreen3","blue","grey6",
+                               "burlywood3", "grey67", "plum2"
+                               )) +
+  geom_text_repel(mapping = aes(label = label, vjust = 2, size = 6),
+            position = "stack", show.legend = F)+
+  theme_classic() +
+  theme(axis.text.x = element_text(size = 14, face = "bold"),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 14, face = "bold"),
+        legend.text = element_text(size = 11, face = "bold")) +
+  guides(fill = guide_legend( ncol = 1, override.aes = list(col = 1)))
+  
+meta.stack
+
+f. = function() { 
+#Save plots
+term <- "stateR_stateS"
+comp <- "merged"
+setwd(paste(dir, dir3, "figures", sep = "/"))
+
+#Save heatmap with annotations
+tiff(file = paste(prefix, cellSamples, "ssGSEA", rows, term, comp,
+                  "pathways_complexheatmap_scaled_by_cellLine_v7.tiff", 
+                  sep = "_"), width = 20, height = 12, units = "in", res = 300, 
+     compression = "lzw")
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+
+#Save heatmap with out row annotations
+tiff(file = paste(prefix, cellSamples, "ssGSEA", rows, term, comp,
+                  "pathways_complexheatmap_scaled_by_cellLine_NoRowNames_v7.tiff", 
+                  sep = "_"), width = 10, height = 8, units = "in", res = 300)
+ht_list <- ComplexHeatmap::draw(hmapGSEA1,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+
+#Save stacked bar plot
+meta.stack
+ggsave(filename = paste0("metaphenotypes_stackedBarPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, "metaPhenotypeAnalysis/figures/"), 
+          units = "in", width = 14, height = 10, dpi = 300, create.dir = T)
+
+}
+
+
+#two seperate heatmaps for figure 2
+
+
+#stateR
+
+#MAKE HEATMAP FOR FIGURE 3 SHOWING GROWTH FACTOR GENE SETS
+
+#keep <- "GF_SIGNALING"
+#Get info from lme for these meta phenotypes
+
+#resistant vs sensitive DMSO
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+lmeResults <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+tmp <- lmeResults %>% 
+  filter(grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Keep meta phenotypes of interest
+main.metas <- c("GF_SIGNALING", "IMMUNE_RESPONSE", "GPCR_SIGNALING",
+                "TF_ACTIVITY", "TP53_SIGNALING", "TRANSCRIPTION",
+                "ANTI.APOPTOSIS", "METABOLISM", "CELL_CYCLE",  
+                "RHO_GTPASE_SIGNALING", "APOPTOSIS", "DNA_REPAIR")
+
+#Coefficient of interest
+coeff <- "stateeverR"
+
+#Get statistically significant pathways
+stateR2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+#Merge gene sets
+gs.stateR <- stateR2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+.f = function() {
+#RESISTANT VS SENSITIVE EVER
+
+#Coefficient of interest
+coeff <- "statesen"                              
+stateS2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+gs.stateS <- stateS2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+gs.all <- c(gs.stateR, gs.stateS) %>% 
+  unique()
+}
+
+gs.all <- gs.stateR %>% 
+  unique()
+
+#Get enrichment scores for gene sets
+setwd(paste0(dir, dir2, "rawScores/"))
+#list.files()
+ssgsea <- fread(file = paste0("COH069_15929R_RNA_everSamples_ssGSEA_",
+                              "collections_H_C2_C5_C6_scores_LongFormat_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+#Get gene sets of interest 
+heat1 <- ssgsea %>% 
+  filter(Gene_Set %in% gs.all,
+         treatment %in% c("DMSO")) %>% 
+  select(Gene_Set, Enrichment_Score, Cell) %>% 
+  pivot_wider(names_from = "Cell", values_from = "Enrichment_Score") %>% 
+  column_to_rownames(var = "Gene_Set") %>% 
+  as.matrix()
+head(heat1)[,1:15]
+
+#Get row number
+rows <- nrow(heat1)
+
+#.f = function() {
+
+#Scale each cell line individually, then merge
+##This worked well
+c <- heat1[,grepl(pattern = "CAMA", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "MCF", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+t <- heat1[,grepl(pattern = "T47D", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  dplyr::select(c("CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  "MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  "T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  "CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  "CAMA1_everR_DMSO_rep_3",
+                  "MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  "MCF7_everR_DMSO_rep_3",
+                  "T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  "T47D_everR_DMSO_rep_3",
+                  #"CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  #"MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  #"T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  #"CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  #"CAMA1_everR_ever_rep_3",
+                  #"MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  #"MCF7_everR_ever_rep_3",
+                  #"T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  #"T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+#}
+
+
+#Reduced name lengths that match order above
+colnames(heat2) <- c(rep("S_DMSO.C", 3),
+                     rep("S_DMSO.M", 3),
+                     rep("S_DMSO.T", 3),
+                     rep("R_DMSO.C", 3),
+                     rep("R_DMSO.M", 3),
+                     rep("R_DMSO.T", 3)
+                     #rep("S_ever.C", 3),
+                     #rep("S_ever.M", 3),
+                     #rep("S_ever.T", 3),
+                     #rep("R_ever.C", 3),
+                     #rep("R_ever.M", 3),
+                     #rep("R_ever.T", 3)
+                     )
+
+
+#hierarchical clustering for rows
+d <- hclust(dist(heat2, method = 'euclidean'), method = 'ward.D2')
+
+
+#MAKE MATRIX WITH COLNAMES AS CELL LINES FOR LEGEND
+cells.df <- heat2
+colnames(cells.df)  <- c(rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3)
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3),
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3)
+                     )
+
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+treatment.df <- heat2
+colnames(treatment.df)  <- c(rep("DMSO", 18)
+                     #rep("Everolimus", 9),
+                     #rep("DMSO", 9),
+                     #rep("Everolimus", 18)
+                     )
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+state.df <- heat2
+colnames(state.df)  <- c(rep("Sensitive", 9),
+                     rep("Resistant", 9)
+                     #rep("Sensitive", 9),
+                     #rep("Resistant", 9)
+                     )
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(treatment.df),
+                               State = colnames(state.df),
+                               col = list(CellLines = c("CAMA1" = "yellow",
+                                                        "MCF7" = "purple",
+                                                        "T47D" = "orange"),
+                                          Treatment = c("DMSO" = "#006400",
+                                                        "Everolimus" = "#0000FF"),
+                                          State = c("Sensitive" = "#1E90FF",
+                                                    "Resistant" = "#8B0A50")
+                                                    #"Sensitive" = "cyan3",
+                                                    #"Resistant" = "hotpink3")
+                                                    ),
+                               annotation_name_gp= gpar(fontsize = 5),
+                               #annotation_height=unit(1,"mm"),
+                               annotation_name_side = "left",
+                               #annotation_name_side = "right",
+                               #annotation_name_rot = -180
+                               #height = unit(0, "mm"),
+                               annotation_legend_param = 
+                                 list(labels_gp = gpar(fontsize = 6,
+                                                       fontface = "bold"),
+                                      title_gp = gpar(fontsize = 6, 
+                                                      fontface = "bold")),
+                               simple_anno_size = unit(.1, "in"))
+
+
+#MAKE LEGEND FOR ANNOTATIONS AND SUB ANNOTATIONS FOR TOP PATHWAYS
+##TOP 20 ANNOTATIONS: UP IN resistant.DMSO
+
+#Make legend for annotations and sub annotations for top pathways
+## Up in resistant.dmso (donw in sensitive.dmso)
+keep <- c("GF_SIGNALING")
+GF_SIGNALING <- stateR2 %>% #loaded this in "figher.method_v6" script
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  #pull(Notes) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#keep <- c("GF_SIGNALING")
+#GF_SIGNALING_S <- stateS2 %>% #loaded this in "figher.method_v6" script
+#  dplyr::filter(metaphenotype == keep) %>%
+#  arrange(enriched) %>% 
+#  #pull(Notes) %>%
+#  pull(Gene_Set) %>%
+#  as.character()
+
+#GF_SIGNALING <- c(GF_SIGNALING_R, GF_SIGNALING_S) %>% unique()
+#GF_SIGNALING <- GF_SIGNALING_R %>% unique()
+
+#Get GF signaling pathways to label
+keep.notes <- "ESTROGEN_SIGNALING"
+not.keep <- c("BIOCARTA_EFP_PATHWAY")
+
+top1.2 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  dplyr::arrange(FDR) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+            
+
+keep.notes <- "INSULIN_SIGNALING"
+not.keep <- c("KEGG_TYPE_II_DIABETES_MELLITUS", 
+              "REACTOME_ADRENALINE_NORADRENALINE_INHIBITS_INSULIN_SECRETION",
+              "REACTOME_REGULATION_OF_INSULIN_SECRETION",
+              paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_IGF_",
+                     "TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_FACTOR_",
+                     "BINDING_PROTEINS_IGFBPS"))
+top1.3 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n = 4) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+
+keep.notes <- c("MAPK_SIGNALING", "MAPK_MTOR_SIGNALING", 
+                "PI3K_MAPK_SIGNALING", "RAS_SIGNALING")
+not.keep <- c("BIOCARTA_AT1R_PATHWAY", "BIOCARTA_PYK2_PATHWAY",
+              "KEGG_GNRH_SIGNALING_PATHWAY", 
+              paste0("REACTOME_JNK_C_JUN_KINASES_PHOSPHORYLATION_AND_ACTIVATION_",
+                     "MEDIATED_BY_ACTIVATED_HUMAN_TAK1"))
+top1.4 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 %in% keep.notes) %>%
+  arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  #arrange(enriched, desc(Estimate)) %>%
+  slice_head(n=5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Merge all GF
+top1 <- c(top1.2, top1.3, top1.4)
+
+
+
+keep <- c("IMMUNE_RESPONSE")
+IMMUNE_RESPONSE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#GPCR_SIGNALING
+keep <- c("GPCR_SIGNALING")
+
+GPCR_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#TF_ACTIVITY
+keep <- c("TF_ACTIVITY")
+TF_ACTIVITY <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#TP53_SIGNALING
+keep <- c("TP53_SIGNALING")
+TP53_SIGNALING <- stateR2 %>% 
+  #filter(!Gene_Set %in% c(paste0("REACTOME_TP53_REGULATES_TRANSCRIPTION_OF_",
+  #                               "ADDITIONAL_CELL_CYCLE_GENES_WHOSE_EXACT_ROLE_",
+  #                               "IN_THE_P53_PATHWAY_REMAIN_UNCERTAIN"))) %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#TRANSCRIPTION
+keep <- c("TRANSCRIPTION")
+TRANSCRIPTION <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#Anti apoptosis
+keep <- c("ANTI.APOPTOSIS")
+ANTI.APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#METABOLISM
+keep <- c("METABOLISM")
+METABOLISM <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#cell cycle
+keep <- c("CELL_CYCLE")
+CELL_CYCLE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#RHO_GTPASE_SIGNALING
+keep <- c("RHO_GTPASE_SIGNALING")
+RHO_GTPASE_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep <- c("APOPTOSIS")
+APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#RHO_GTPASE_SIGNALING
+keep <- c("STRESSS_RESPONSE")
+STRESSS_RESPONSE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep <- c("DNA_REPAIR")
+DNA_REPAIR <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Put gene sets in order and match to matrix
+ord <- c(GF_SIGNALING, IMMUNE_RESPONSE, GPCR_SIGNALING, TF_ACTIVITY,
+         TP53_SIGNALING, TRANSCRIPTION, ANTI.APOPTOSIS, 
+         METABOLISM, CELL_CYCLE, RHO_GTPASE_SIGNALING, APOPTOSIS, 
+         #STRESS_RESPONSE, 
+         DNA_REPAIR)
+
+heat2 <- heat2[match(ord, rownames(heat2)),]
+
+#Get T/F matrix for all gene sets in selected meta phenotypes for sub-heatmaps
+## Colors all gene-sets according to meta-phenotype
+GF_SIGNALING_1 <- rownames(heat2) %in% GF_SIGNALING
+IMMUNE_RESPONSE_1 <- rownames(heat2) %in% IMMUNE_RESPONSE
+GPCR_SIGNALING_1 <- rownames(heat2) %in% GPCR_SIGNALING
+TF_ACTIVITY_1 <- rownames(heat2) %in% TF_ACTIVITY
+TP53_SIGNALING_1 <- rownames(heat2) %in% TP53_SIGNALING
+TRANSCRIPTION_1 <- rownames(heat2) %in% TRANSCRIPTION
+ANTI.APOPTOSIS_1 <- rownames(heat2) %in% ANTI.APOPTOSIS
+METABOLISM_1 <- rownames(heat2) %in% METABOLISM
+CELL_CYCLE_1 <- rownames(heat2) %in% CELL_CYCLE
+RHO_GTPASE_SIGNALING_1 <- rownames(heat2) %in% RHO_GTPASE_SIGNALING
+APOPTOSIS_1 <- rownames(heat2) %in% APOPTOSIS
+#STRESS_RESPONSE_1 <- rownames(heat2) %in% STRESS_RESPONSE
+DNA_REPAIR_1 <- rownames(heat2) %in% DNA_REPAIR
+
+
+
+#Merge all gene set names that will be labeled
+top.merg <- c(top1)
+#top.merg <- top1
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene_Set = rownames(heat2))
+
+#Get gene sets and respective meta phenotypes
+tmp.2 <- stateR2 %>%
+  dplyr::filter(Gene_Set %in% tmp.$Gene_Set) %>%
+  dplyr::select(Gene_Set, metaphenotype)
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  left_join(tmp.2) %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "IMMUNE_RESPONSE",  "cyan4",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "palegreen2",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "orchid2",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "deeppink3",
+                      ifelse(metaphenotype == "TRANSCRIPTION", "#006400",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "METABOLISM", "lightpink",
+                      ifelse(metaphenotype == "CELL_CYCLE",  "#8B5A00",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "orange",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      ifelse(metaphenotype ==  "DNA_REPAIR", "rosybrown", #bc8f8f
+                      #ifelse(metaphenotype == "STRESS_RESPONSE", "yellow3",
+                               ""
+                               ))))))))))))) %>%
+  pull(color) %>%
+  as.character()
+
+fsize <- 6
+width <- 2
+
+#heat3 <- heat2 %>% 
+#  as.data.frame() %>% 
+#  rownames_to_column(var = "gs") %>% 
+#  separate(gs, into = c("gs", "gs1"), remove = F, extra = "merg", sep = "_") %>% 
+#  select(-c(gs)) %>% 
+#  column_to_rownames(var = "gs1") %>% 
+#  as.matrix()
+
+tmp <- rownames(heat2) %>% 
+  as.data.frame() %>% 
+  rename("gs" = ".") %>% 
+  separate(gs, into = c("g1", "g2"), remove = F, extra = "merge", sep = "_")
+
+if (all(tmp$gs == rownames(heat2))) {
+  print("names match")
+  rownames(heat2) <- tmp$g2
+} else {
+    stop(print("names to not match"))
+  }
+
+
+#MAKE HEATMAP
+hmapGSEA <- Heatmap(heat2,
+        name = "Enrichment", 
+        col = myCol,
+        #column_title = GetoptLong::qq("Enrichment Scores for @{nrow(heat2)} Pathways"),
+        #column_title = GetoptLong::qq(""),
+        top_annotation = column_ha,
+        column_title_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5),
+        cluster_columns = F,
+        #cluster_rows = as.dendrogram(d),
+        #column_names_gp = gpar(fontsize = 12),
+        show_row_names = F,
+        show_column_dend = F,
+        show_column_names = F,
+        column_split = c(rep(1:2, each = 9)),
+        column_gap = unit(1, "mm"),
+        row_split = c(rep(1, each = length(GF_SIGNALING)), 
+                      rep(2, each = length(IMMUNE_RESPONSE)), 
+                      rep(3, each = length(GPCR_SIGNALING)), 
+                      rep(4, each = length(TF_ACTIVITY)),
+                      rep(5, each = length(TP53_SIGNALING)),
+                      rep(6, each = length(TRANSCRIPTION)), 
+                      rep(7, each = length(ANTI.APOPTOSIS)),
+                      rep(8, each = length(METABOLISM)),
+                      rep(9, each = length(CELL_CYCLE)),
+                      rep(10, each = length(RHO_GTPASE_SIGNALING)),
+                      rep(11, each = length(APOPTOSIS)),
+                      rep(12, each = length(DNA_REPAIR))),
+                      #rep(8, each = length(STRESS_RESPONSE)),
+        row_gap = unit(2, "mm"),
+        cluster_rows = F,
+        row_names_centered = T,
+        heatmap_legend_param = list(labels_gp = gpar(fontsize = 6),
+                                    title_gp = gpar(fontsize = 6),
+                                    legend_gp = gpar(fontsize = 6),
+                                    legend_height = unit(0.5, "mm")),
+        raster_device = "tiff") +
+  Heatmap(GF_SIGNALING_1 + 0,
+          name = "GF_SIGNALING", col = c("0" = "white", "1" = "#ef3b2c"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ef3b2c",
+                                 fontface = "bold"), 
+          column_names_rot = 30) +
+  Heatmap(IMMUNE_RESPONSE_1 + 0,
+          name = "IMMUNE_RESPONSE ", col = c("0" = "white", "1" = "#008B8B"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "cyan4",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(GPCR_SIGNALING_1 + 0,
+          name = "GPCR_SIGNALING", col = c("0" = "white", "1" = "#90EE90"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "palegreen2",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TF_ACTIVITY_1 + 0,
+          name = "TF_ACTIVITY", col = c("0" = "white", "1" = "#EE7AE9"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orchid2",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TP53_SIGNALING_1 + 0,
+          name = "TP53_SIGNALING", col = c("0" = "white", "1" = "#CD1076"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "deeppink3",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TRANSCRIPTION_1 + 0,
+          name = "TRANSCRIPTION", col = c("0" = "white", "1" = "#006400"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#006400",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ANTI.APOPTOSIS_1 + 0, 
+          name = "ANTI.APOPTOSIS", col = c("0" = "white", "1" = "#4A1486"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#4A1486",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(METABOLISM_1 + 0,
+          name = "METABOLISM", col = c("0" = "white", "1" = "#FFB6C1"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "lightpink",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_CYCLE_1 + 0, 
+          name = "CELL_CYCLE", col = c("0" = "white", "1" = "#8B5A00"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8B5A00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(RHO_GTPASE_SIGNALING_1 + 0,
+          name = "RHO_GTPASE_SIGNALING", col = c("0" = "white", "1" = "#FFA500"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orange",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(APOPTOSIS_1 + 0, 
+          name = "APOPTOSIS", col = c("0" = "white", "1" = "#0570b0"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#0570b0",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(DNA_REPAIR_1 + 0,
+          name = "DNA_REPAIR", col = c("0" = "white", "1" = "rosybrown"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "rosybrown",
+                                 fontface = "bold"), column_names_rot = 30) +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 6, col = tmp.3, fontface = "bold"),
+        padding = unit(1.5, "mm")),
+        annotation_name_rot = 45) 
+
+#f. = function() { 
+#Save plots
+term <- "stateR"
+comp <- "Only"
+setwd(paste0(dir, dir3, "figures"))
+
+#Save heatmap with annotations
+tiff(file = paste(prefix, cellSamples, "ssGSEA", rows, term, comp,
+                  "pathways_complexheatmap_scaled_by_cellLine_v7.tiff", 
+                  sep = "_"), width = 9, height = 4, units = "in", res = 300, 
+     compression = "lzw")
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+
+#}
+
+
+
+#stateS
+
+#MAKE HEATMAP FOR FIGURE 3 SHOWING GROWTH FACTOR GENE SETS
+
+#keep <- "GF_SIGNALING"
+#Get info from lme for these meta phenotypes
+
+#resistant vs sensitive DMSO
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+lmeResults <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+tmp <- lmeResults %>% 
+  filter(grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Keep meta phenotypes of interest
+main.metas <- c("GF_SIGNALING", "GPCR_SIGNALING",
+                "TP53_SIGNALING", "AQUAPORIN.MEDIATED_TRANSPORT",
+                "ANTI.APOPTOSIS", "METABOLISM", "POST.TRANSLATION_MODIFICATION",
+                "RHO_GTPASE_SIGNALING", "TF_ACTIVITY", "APOPTOSIS")
+
+#Coefficient of interest
+coeff <- "statesen"
+
+#Get statistically significant pathways
+stateR2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+#Merge gene sets
+gs.stateR <- stateR2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+gs.all <- gs.stateR %>% 
+  unique()
+
+#Get enrichment scores for gene sets
+setwd(paste0(dir, dir2, "rawScores/"))
+#list.files()
+ssgsea <- fread(file = paste0("COH069_15929R_RNA_everSamples_ssGSEA_",
+                              "collections_H_C2_C5_C6_scores_LongFormat_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+#Get gene sets of interest 
+heat1 <- ssgsea %>% 
+  filter(Gene_Set %in% gs.all,
+         treatment %in% c("ever")) %>% 
+  select(Gene_Set, Enrichment_Score, Cell) %>% 
+  pivot_wider(names_from = "Cell", values_from = "Enrichment_Score") %>% 
+  column_to_rownames(var = "Gene_Set") %>% 
+  as.matrix()
+head(heat1)[,1:5]
+
+#Get row number
+rows <- nrow(heat1)
+
+#.f = function() {
+
+#Scale each cell line individually, then merge
+##This worked well
+c <- heat1[,grepl(pattern = "CAMA", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "MCF", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+t <- heat1[,grepl(pattern = "T47D", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  dplyr::select(c(#"CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  #"MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  #"T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  #"CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  #"CAMA1_everR_DMSO_rep_3",
+                  #"MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  #"MCF7_everR_DMSO_rep_3",
+                  #"T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  #"T47D_everR_DMSO_rep_3",
+                  "CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  "MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  "T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  "CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  "CAMA1_everR_ever_rep_3",
+                  "MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  "MCF7_everR_ever_rep_3",
+                  "T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  "T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+#}
+
+
+#Reduced name lengths that match order above
+colnames(heat2) <- c(#rep("S_DMSO.C", 3),
+                     #rep("S_DMSO.M", 3),
+                     #rep("S_DMSO.T", 3),
+                     #rep("R_DMSO.C", 3),
+                     #rep("R_DMSO.M", 3),
+                     #rep("R_DMSO.T", 3)
+                     rep("S_ever.C", 3),
+                     rep("S_ever.M", 3),
+                     rep("S_ever.T", 3),
+                     rep("R_ever.C", 3),
+                     rep("R_ever.M", 3),
+                     rep("R_ever.T", 3)
+                     )
+
+
+#hierarchical clustering for rows
+d <- hclust(dist(heat2, method = 'euclidean'), method = 'ward.D2')
+
+
+#MAKE MATRIX WITH COLNAMES AS CELL LINES FOR LEGEND
+cells.df <- heat2
+colnames(cells.df)  <- c(rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3)
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3),
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3)
+                     )
+
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+treatment.df <- heat2
+colnames(treatment.df)  <- c(#rep("DMSO", 18)
+                     #rep("Everolimus", 9),
+                     #rep("DMSO", 9),
+                     rep("Everolimus", 18)
+                     )
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+state.df <- heat2
+colnames(state.df)  <- c(rep("Sensitive", 9),
+                     rep("Resistant", 9)
+                     #rep("Sensitive", 9),
+                     #rep("Resistant", 9)
+                     )
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(treatment.df),
+                               State = colnames(state.df),
+                               col = list(CellLines = c("CAMA1" = "yellow",
+                                                        "MCF7" = "purple",
+                                                        "T47D" = "orange"),
+                                          Treatment = c("DMSO" = "#006400",
+                                                        "Everolimus" = "#0000FF"),
+                                          State = c(#"Sensitive" = "#1E90FF",
+                                                    #"Resistant" = "#8B0A50")
+                                                    "Sensitive" = "cyan3",
+                                                    "Resistant" = "hotpink3")
+                                                    ),
+                               annotation_name_gp= gpar(fontsize = 5),
+                               #annotation_height=unit(1,"mm"),
+                               annotation_name_side = "left",
+                               #annotation_name_side = "right",
+                               #annotation_name_rot = -180
+                               #height = unit(0, "mm"),
+                               annotation_legend_param = 
+                                 list(labels_gp = gpar(fontsize = 6,
+                                                       fontface = "bold"),
+                                      title_gp = gpar(fontsize = 6, 
+                                                      fontface = "bold")),
+                               simple_anno_size = unit(.1, "in"))
+
+
+#MAKE LEGEND FOR ANNOTATIONS AND SUB ANNOTATIONS FOR TOP PATHWAYS
+##TOP 20 ANNOTATIONS: UP IN resistant.ever
+
+#Make legend for annotations and sub annotations for top pathways
+## Up in resistant.dmso (donw in sensitive.dmso)
+keep <- c("GF_SIGNALING")
+GF_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  #pull(Notes) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#GF_SIGNALING <- c(GF_SIGNALING_R, GF_SIGNALING_S) %>% unique()
+#GF_SIGNALING <- GF_SIGNALING_R %>% unique()
+
+#Get GF signaling pathways to label
+keep.notes <- "ESTROGEN_SIGNALING"
+not.keep <- c("BIOCARTA_EFP_PATHWAY")
+
+top1.2 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n=2) %>% 
+  #dplyr::arrange(FDR) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+            
+
+keep.notes <- "INSULIN_SIGNALING"
+not.keep <- c("KEGG_TYPE_II_DIABETES_MELLITUS", 
+              "REACTOME_ADRENALINE_NORADRENALINE_INHIBITS_INSULIN_SECRETION",
+              "REACTOME_REGULATION_OF_INSULIN_SECRETION",
+              paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_IGF_",
+                     "TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_FACTOR_",
+                     "BINDING_PROTEINS_IGFBPS"))
+top1.3 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n = 3) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+
+keep.notes <- c("MAPK_SIGNALING", "MAPK_MTOR_SIGNALING", 
+                "PI3K_MAPK_SIGNALING", "RAS_SIGNALING")
+not.keep <- c("BIOCARTA_HCMV_PATHWAY", "BIOCARTA_PYK2_PATHWAY",
+              "KEGG_GNRH_SIGNALING_PATHWAY", 
+              paste0("REACTOME_MAPK_TARGETS_NUCLEAR_EVENTS_MEDIATED_",
+                     "BY_MAP_KINASES"))
+top1.4 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 %in% keep.notes) %>%
+  arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  #arrange(enriched, desc(Estimate)) %>%
+  #slice_head(n=5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep.notes <- "FGFR_SIGNALING"
+
+top1.5 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  #filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n=2) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep.notes <- "ERBB_SIGNALING"
+
+top1.6 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  #filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n=2) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#Merge all GF
+top1 <- c(top1.2, top1.3, top1.4, top1.5, top1.6)
+
+
+#GPCR_SIGNALING
+keep <- c("GPCR_SIGNALING")
+
+GPCR_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#TP53_SIGNALING
+keep <- c("TP53_SIGNALING")
+TP53_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#AQUAPORIN.MEDIATED_TRANSPORT
+keep <- c("AQUAPORIN.MEDIATED_TRANSPORT")
+AQUAPORIN.MEDIATED_TRANSPORT <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#Anti apoptosis
+keep <- c("ANTI.APOPTOSIS")
+ANTI.APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#METABOLISM
+keep <- c("METABOLISM")
+METABOLISM <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#POST.TRANSLATION_MODIFICATION
+keep <- c("POST.TRANSLATION_MODIFICATION")
+POST.TRANSLATION_MODIFICATION <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#RHO_GTPASE_SIGNALING
+keep <- c("RHO_GTPASE_SIGNALING")
+RHO_GTPASE_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#TF_ACTIVITY
+keep <- c("TF_ACTIVITY")
+TF_ACTIVITY <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+#APOPTOSIS
+keep <- c("APOPTOSIS")
+APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Put gene sets in order and match to matrix
+ord <- c(GF_SIGNALING, 
+         GPCR_SIGNALING, 
+         TP53_SIGNALING,
+         AQUAPORIN.MEDIATED_TRANSPORT,
+         ANTI.APOPTOSIS, 
+         METABOLISM, 
+         POST.TRANSLATION_MODIFICATION,
+         RHO_GTPASE_SIGNALING,
+         TF_ACTIVITY, 
+         APOPTOSIS)
+
+heat2 <- heat2[match(ord, rownames(heat2)),]
+
+#Get T/F matrix for all gene sets in selected meta phenotypes for sub-heatmaps
+## Colors all gene-sets according to meta-phenotype
+GF_SIGNALING_1 <- rownames(heat2) %in% GF_SIGNALING
+GPCR_SIGNALING_1 <- rownames(heat2) %in% GPCR_SIGNALING
+TP53_SIGNALING_1 <- rownames(heat2) %in% TP53_SIGNALING
+AQUAPORIN.MEDIATED_TRANSPORT_1 <- rownames(heat2) %in% AQUAPORIN.MEDIATED_TRANSPORT
+ANTI.APOPTOSIS_1 <- rownames(heat2) %in% ANTI.APOPTOSIS
+METABOLISM_1 <- rownames(heat2) %in% METABOLISM
+POST.TRANSLATION_MODIFICATION_1 <- rownames(heat2) %in% POST.TRANSLATION_MODIFICATION
+RHO_GTPASE_SIGNALING_1 <- rownames(heat2) %in% RHO_GTPASE_SIGNALING
+TF_ACTIVITY_1 <- rownames(heat2) %in% TF_ACTIVITY
+APOPTOSIS_1 <- rownames(heat2) %in% APOPTOSIS
+
+
+
+#Merge all gene set names that will be labeled
+top.merg <- c(top1)
+#top.merg <- top1
+
+#remove first part in gene set names
+tmp <- rownames(heat2) %>% 
+  as.data.frame() %>% 
+  rename("gs" = ".") %>% 
+  separate(gs, into = c("g1", "g2"), remove = F, extra = "merge", sep = "_")
+
+
+if (all(tmp$gs == rownames(heat2))) {
+  print("names match")
+  rownames(heat2) <- tmp$g2
+} else {
+    stop(print("names to not match"))
+  }
+
+top.merg <- top.merg %>% 
+  as.data.frame() %>% 
+  separate(".", into = c("g", "g2"), extra = "merge", remove = F, sep = "_") %>% 
+  pull(g2) %>% 
+  as.character()
+
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene_Set = rownames(heat2))
+
+#Get gene sets and respective meta phenotypes
+tmp.2 <- stateR2 %>%
+  dplyr::filter(path.info_2 %in% tmp.$Gene_Set) %>%
+  dplyr::select(path.info_2, metaphenotype) %>% 
+  rename("Gene_Set" = "path.info_2")
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  left_join(tmp.2) %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "palegreen2",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "deeppink3",
+                      ifelse(metaphenotype == "AQUAPORIN.MEDIATED_TRANSPORT", "#006400",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "METABOLISM", "lightpink",
+                      ifelse(metaphenotype == "POST.TRANSLATION_MODIFICATION",  "#8B5A00",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "orange",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "orchid2",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      #ifelse(metaphenotype ==  "DNA_REPAIR", "rosybrown",
+                      #ifelse(metaphenotype == "STRESS_RESPONSE", "yellow3",
+                               ""
+                               ))))))))))) %>%
+  pull(color) %>%
+  as.character()
+
+fsize <- 5.5
+width <- 2
+
+
+hmapGSEA <- Heatmap(heat2,
+        name = "Enrichment", 
+        col = myCol,
+        #column_title = GetoptLong::qq("Enrichment Scores for @{nrow(heat2)} Pathways"),
+        #column_title = GetoptLong::qq(""),
+        top_annotation = column_ha,
+        column_title_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5),
+        cluster_columns = F,
+        #cluster_rows = as.dendrogram(d),
+        #column_names_gp = gpar(fontsize = 12),
+        show_row_names = F,
+        show_column_dend = F,
+        show_column_names = F,
+        column_split = c(rep(1:2, each = 9)),
+        column_gap = unit(1, "mm"),
+        row_split = c(rep(1, each = length(GF_SIGNALING)), 
+                      rep(2, each = length(GPCR_SIGNALING)), 
+                      rep(3, each = length(TP53_SIGNALING)),
+                      rep(4, each = length(AQUAPORIN.MEDIATED_TRANSPORT)), 
+                      rep(5, each = length(ANTI.APOPTOSIS)),
+                      rep(6, each = length(METABOLISM)),
+                      rep(7, each = length(POST.TRANSLATION_MODIFICATION)),
+                      rep(8, each = length(RHO_GTPASE_SIGNALING)),
+                      rep(9, each = length(TF_ACTIVITY)),
+                      rep(10, each = length(APOPTOSIS))),
+        row_gap = unit(2, "mm"),
+        cluster_rows = F,
+        row_names_centered = T,
+        heatmap_legend_param = list(labels_gp = gpar(fontsize = 6),
+                                    title_gp = gpar(fontsize = 6),
+                                    legend_gp = gpar(fontsize = 6),
+                                    legend_height = unit(0.5, "mm")),
+        raster_device = "tiff") +
+  Heatmap(GF_SIGNALING_1 + 0,
+          name = "GF_SIGNALING", col = c("0" = "white", "1" = "#ef3b2c"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ef3b2c",
+                                 fontface = "bold"), 
+          column_names_rot = 30) +
+  Heatmap(GPCR_SIGNALING_1 + 0,
+          name = "GPCR_SIGNALING", col = c("0" = "white", "1" = "#90EE90"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "palegreen2",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TP53_SIGNALING_1 + 0,
+          name = "TP53_SIGNALING", col = c("0" = "white", "1" = "#CD1076"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "deeppink3",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(AQUAPORIN.MEDIATED_TRANSPORT_1 + 0,
+          name = "AQUAPORIN.MEDIATED_TRANSPORT", col = c("0" = "white", "1" = "#006400"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#006400",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ANTI.APOPTOSIS_1 + 0, 
+          name = "ANTI.APOPTOSIS", col = c("0" = "white", "1" = "#4A1486"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#4A1486",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(METABOLISM_1 + 0,
+          name = "METABOLISM", col = c("0" = "white", "1" = "#FFB6C1"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "lightpink",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(POST.TRANSLATION_MODIFICATION_1 + 0, 
+          name = "POST.TRANSLATION_MODIFICATION", col = c("0" = "white", "1" = "#8B5A00"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8B5A00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(RHO_GTPASE_SIGNALING_1 + 0,
+          name = "RHO_GTPASE_SIGNALING", col = c("0" = "white", "1" = "#FFA500"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orange",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TF_ACTIVITY_1 + 0,
+          name = "TF_ACTIVITY", col = c("0" = "white", "1" = "#EE7AE9"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orchid2",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(APOPTOSIS_1 + 0, 
+          name = "APOPTOSIS", col = c("0" = "white", "1" = "#0570b0"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#0570b0",
+                                 fontface = "bold"), column_names_rot = 30) +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 6, col = tmp.3, fontface = "bold"),
+        padding = unit(1.5, "mm")),
+        annotation_name_rot = 45) 
+
+#f. = function() { 
+#Save plots
+term <- "stateS"
+comp <- "Only"
+setwd(paste0(dir, dir3, "figures"))
+
+#Save heatmap with annotations
+tiff(file = paste(prefix, cellSamples, "ssGSEA", rows, term, comp,
+                  "pathways_complexheatmap_scaled_by_cellLine_v7.tiff", 
+                  sep = "_"), width = 6.8, height = 4, units = "in", res = 300, 
+     compression = "lzw")
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+#}
+```
+
+
+
+
+```{r}
+#two seperate heatmaps for figure 2: post-treatment
+set.seed(09072024)
+#stateR
+
+#MAKE HEATMAP FOR FIGURE 3 SHOWING GROWTH FACTOR GENE SETS
+
+#keep <- "GF_SIGNALING"
+#Get info from lme for these meta phenotypes
+
+#resistant vs sensitive DMSO
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+lmeResults <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results.txt"),
+                sep = "\t", header = T, quote = "")
+
+tmp <- lmeResults %>% 
+  filter(grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Keep meta phenotypes of interest
+main.metas <- c("GF_SIGNALING", "IMMUNE_RESPONSE", "GPCR_SIGNALING",
+          "STEMNESS", 
+          "ANTI.APOPTOSIS", 
+          "CELL_CYCLE",  
+          "METABOLISM", "APOPTOSIS", "TF_ACTIVITY",
+          "STRESS_RESPONSE", "RHO_GTPASE_SIGNALING",
+          "TP53_SIGNALING",
+          "DNA_REPAIR"
+          )
+
+#Coefficient of interest
+coeff <- "stateeverR"
+
+#Get statistically significant pathways
+stateR2 <- lmeResults %>%
+  filter(FDR <= 0.05,
+         coefficient == coeff,
+         metaphenotype %in% main.metas,
+         !Gene_Set %in% tmp) 
+
+#Merge gene sets
+gs.stateR <- stateR2 %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+gs.all <- gs.stateR %>% 
+  unique()
+
+#Get enrichment scores for gene sets
+setwd(paste0(dir, dir2, "rawScores/"))
+#list.files()
+ssgsea <- fread(file = paste0("COH069_15929R_RNA_everSamples_ssGSEA_",
+                              "collections_H_C2_C5_C6_scores_LongFormat.txt"),
+                sep = "\t", header = T, quote = "")
+
+#Get gene sets of interest 
+heat1 <- ssgsea %>% 
+  filter(Gene_Set %in% gs.all,
+         treatment %in% c("DMSO")) %>% 
+  select(Gene_Set, Enrichment_Score, Cell) %>% 
+  pivot_wider(names_from = "Cell", values_from = "Enrichment_Score") %>% 
+  column_to_rownames(var = "Gene_Set") %>% 
+  as.matrix()
+head(heat1)[,1:5]
+
+#Get row number
+rows <- nrow(heat1)
+
+#.f = function() {
+
+#Scale each cell line individually, then merge
+##This worked well
+c <- heat1[,grepl(pattern = "CAMA", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "MCF", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+t <- heat1[,grepl(pattern = "T47D", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  dplyr::select(c("CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  "MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  "T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  "CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  "CAMA1_everR_DMSO_rep_3",
+                  "MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  "MCF7_everR_DMSO_rep_3",
+                  "T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  "T47D_everR_DMSO_rep_3",
+                  #"CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  #"MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  #"T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  #"CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  #"CAMA1_everR_ever_rep_3",
+                  #"MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  #"MCF7_everR_ever_rep_3",
+                  #"T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  #"T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+#}
+
+
+#Reduced name lengths that match order above
+colnames(heat2) <- c(rep("S_DMSO.C", 3),
+                     rep("S_DMSO.M", 3),
+                     rep("S_DMSO.T", 3),
+                     rep("R_DMSO.C", 3),
+                     rep("R_DMSO.M", 3),
+                     rep("R_DMSO.T", 3)
+                     #rep("S_ever.C", 3),
+                     #rep("S_ever.M", 3),
+                     #rep("S_ever.T", 3),
+                     #rep("R_ever.C", 3),
+                     #rep("R_ever.M", 3),
+                     #rep("R_ever.T", 3)
+                     )
+
+
+#hierarchical clustering for rows
+d <- hclust(dist(heat2, method = 'euclidean'), method = 'ward.D2')
+
+
+#MAKE MATRIX WITH COLNAMES AS CELL LINES FOR LEGEND
+cells.df <- heat2
+colnames(cells.df)  <- c(rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3)
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3),
+                     #rep("CAMA1", 3),
+                     #rep("MCF7", 3),
+                     #rep("T47D", 3)
+                     )
+
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+treatment.df <- heat2
+colnames(treatment.df)  <- c(rep("DMSO", 18)
+                     #rep("Everolimus", 9),
+                     #rep("DMSO", 9),
+                     #rep("Everolimus", 18)
+                     )
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+state.df <- heat2
+colnames(state.df)  <- c(rep("Sensitive", 9),
+                     rep("Resistant", 9)
+                     #rep("Sensitive", 9),
+                     #rep("Resistant", 9)
+                     )
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(treatment.df),
+                               State = colnames(state.df),
+                               col = list(CellLines = c("CAMA1" = "yellow",
+                                                        "MCF7" = "purple",
+                                                        "T47D" = "orange"),
+                                          Treatment = c("DMSO" = "#006400",
+                                                        "Everolimus" = "#0000FF"),
+                                          State = c("Sensitive" = "#1E90FF",
+                                                    "Resistant" = "#8B0A50")
+                                                    #"Sensitive" = "cyan3",
+                                                    #"Resistant" = "hotpink3")
+                                                    ),
+                               annotation_name_gp= gpar(fontsize = 5),
+                               #annotation_height=unit(1,"mm"),
+                               annotation_name_side = "left",
+                               #annotation_name_side = "right",
+                               #annotation_name_rot = -180
+                               #height = unit(0, "mm"),
+                               annotation_legend_param = 
+                                 list(labels_gp = gpar(fontsize = 6,
+                                                       fontface = "bold"),
+                                      title_gp = gpar(fontsize = 6, 
+                                                      fontface = "bold")),
+                               simple_anno_size = unit(.1, "in"))
+
+#MAKE LEGEND FOR ANNOTATIONS AND SUB ANNOTATIONS FOR TOP PATHWAYS
+##TOP 20 ANNOTATIONS: UP IN resistant.DMSO
+
+#Make legend for annotations and sub annotations for top pathways
+## Up in resistant.dmso (donw in sensitive.dmso)
+keep <- c("GF_SIGNALING")
+GF_SIGNALING <- stateR2 %>% #loaded this in "figher.method_v6" script
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  #pull(Notes) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+#keep <- c("GF_SIGNALING")
+#GF_SIGNALING_S <- stateS2 %>% #loaded this in "figher.method_v6" script
+#  dplyr::filter(metaphenotype == keep) %>%
+#  arrange(enriched) %>% 
+#  #pull(Notes) %>%
+#  pull(Gene_Set) %>%
+#  as.character()
+
+#GF_SIGNALING <- c(GF_SIGNALING_R, GF_SIGNALING_S) %>% unique()
+#GF_SIGNALING <- GF_SIGNALING_R %>% unique()
+
+#Get GF signaling pathways to label
+keep.notes <- "ESTROGEN_SIGNALING"
+not.keep <- c("BIOCARTA_EFP_PATHWAY")
+
+top1.2 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n=2) %>% 
+  #dplyr::arrange(FDR) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+            
+
+keep.notes <- "INSULIN_SIGNALING"
+not.keep <- c("KEGG_TYPE_II_DIABETES_MELLITUS", 
+              "REACTOME_ADRENALINE_NORADRENALINE_INHIBITS_INSULIN_SECRETION",
+              "REACTOME_REGULATION_OF_INSULIN_SECRETION",
+              paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_IGF_",
+                     "TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_FACTOR_",
+                     "BINDING_PROTEINS_IGFBPS"))
+top1.3 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 == keep.notes) %>%
+  arrange(FDR) %>%
+  #filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n = 3) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+
+keep.notes <- c("MAPK_SIGNALING", "MAPK_MTOR_SIGNALING", 
+                "PI3K_MAPK_SIGNALING", "RAS_SIGNALING")
+not.keep <- c("BIOCARTA_HCMV_PATHWAY", "BIOCARTA_PYK2_PATHWAY",
+              "KEGG_GNRH_SIGNALING_PATHWAY", 
+              paste0("REACTOME_MAPK_TARGETS_NUCLEAR_EVENTS_MEDIATED_",
+                     "BY_MAP_KINASES"))
+top1.4 <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep & 
+                metaphenotype_2 %in% keep.notes) %>%
+  arrange(FDR) %>%
+  filter(!Gene_Set %in% not.keep) %>% 
+  #arrange(enriched, desc(Estimate)) %>%
+  #slice_head(n=5) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+keep.notes <- "FGFR_SIGNALING"
+
+top1.5 <- stateR2 %>% 
+  filter(metaphenotype == keep & metaphenotype_2 == keep.notes) %>%
+  dplyr::arrange(FDR) %>%
+  #filter(!Gene_Set %in% not.keep) %>% 
+  slice_head(n=2) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Merge all GF
+top1 <- c(top1.2, top1.3, top1.4, top1.5)
+
+
+
+keep <- c("IMMUNE_RESPONSE")
+IMMUNE_RESPONSE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#GPCR_SIGNALING
+keep <- c("GPCR_SIGNALING")
+
+GPCR_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+
+#STEMNESS
+keep <- c("STEMNESS")
+STEMNESS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#TF_ACTIVITY
+keep <- c("TF_ACTIVITY")
+TF_ACTIVITY <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#DNA_REPAIR
+keep <- c("DNA_REPAIR")
+DNA_REPAIR <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#TP53_SIGNALING
+keep <- c("TP53_SIGNALING")
+TP53_SIGNALING <- stateR2 %>% 
+  filter(!Gene_Set %in% c(paste0("REACTOME_TP53_REGULATES_TRANSCRIPTION_OF_",
+                                 "ADDITIONAL_CELL_CYCLE_GENES_WHOSE_EXACT_ROLE_",
+                                 "IN_THE_P53_PATHWAY_REMAIN_UNCERTAIN"))) %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Stress response
+keep <- c("STRESS_RESPONSE")
+STRESS_RESPONSE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Anti apoptosis
+keep <- c("ANTI.APOPTOSIS")
+ANTI.APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+keep <- c("APOPTOSIS")
+APOPTOSIS <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#cell cycle
+keep <- c("CELL_CYCLE")
+CELL_CYCLE <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  dplyr::arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#METABOLISM
+keep <- c("METABOLISM")
+METABOLISM <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+
+#RHO_GTPASE_SIGNALING
+keep <- c("RHO_GTPASE_SIGNALING")
+RHO_GTPASE_SIGNALING <- stateR2 %>% 
+  dplyr::filter(metaphenotype == keep) %>%
+  arrange(enriched) %>% 
+  pull(Gene_Set) %>%
+  as.character()
+
+
+#Put gene sets in order and match to matrix
+ord <- c(GF_SIGNALING, 
+         IMMUNE_RESPONSE, 
+         GPCR_SIGNALING, 
+         STEMNESS, 
+         TF_ACTIVITY,
+         DNA_REPAIR,
+         TP53_SIGNALING, 
+         ANTI.APOPTOSIS, 
+         APOPTOSIS, 
+         CELL_CYCLE, 
+         METABOLISM, RHO_GTPASE_SIGNALING)
+
+heat2 <- heat2[match(ord, rownames(heat2)),]
+
+#Get T/F matrix for all gene sets in selected meta phenotypes for sub-heatmaps
+## Colors all gene-sets according to meta-phenotype
+GF_SIGNALING_1 <- rownames(heat2) %in% GF_SIGNALING
+IMMUNE_RESPONSE_1 <- rownames(heat2) %in% IMMUNE_RESPONSE
+GPCR_SIGNALING_1 <- rownames(heat2) %in% GPCR_SIGNALING
+STEMNESS_1 <- rownames(heat2) %in% STEMNESS
+TF_ACTIVITY_1 <- rownames(heat2) %in% TF_ACTIVITY
+DNA_REPAIR_1 <- rownames(heat2) %in% DNA_REPAIR
+TP53_SIGNALING_1 <- rownames(heat2) %in% TP53_SIGNALING
+#STRESS_RESPONSE_1 <- rownames(heat2) %in% STRESS_RESPONSE
+ANTI.APOPTOSIS_1 <- rownames(heat2) %in% ANTI.APOPTOSIS
+APOPTOSIS_1 <- rownames(heat2) %in% APOPTOSIS
+CELL_CYCLE_1 <- rownames(heat2) %in% CELL_CYCLE
+METABOLISM_1 <- rownames(heat2) %in% METABOLISM
+RHO_GTPASE_SIGNALING_1 <- rownames(heat2) %in% RHO_GTPASE_SIGNALING
+
+
+
+#Merge all gene set names that will be labeled
+top.merg <- c(top1)
+#top.merg <- top1
+
+#remove first part in gene set names
+tmp <- rownames(heat2) %>% 
+  as.data.frame() %>% 
+  rename("gs" = ".") %>% 
+  separate(gs, into = c("g1", "g2"), remove = F, extra = "merge", sep = "_")
+
+
+if (all(tmp$gs == rownames(heat2))) {
+  print("names match")
+  rownames(heat2) <- tmp$g2
+} else {
+    stop(print("names to not match"))
+  }
+
+top.merg <- top.merg %>% 
+  as.data.frame() %>% 
+  separate(".", into = c("g", "g2"), extra = "merge", remove = F, sep = "_") %>% 
+  pull(g2) %>% 
+  as.character()
+
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene_Set = rownames(heat2))
+
+#Get gene sets and respective meta phenotypes
+tmp.2 <- stateR2 %>%
+  dplyr::filter(path.info_2 %in% tmp.$Gene_Set) %>%
+  dplyr::select(path.info_2, metaphenotype) %>% 
+  rename("Gene_Set" = "path.info_2")
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  left_join(tmp.2, by = "Gene_Set") %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "IMMUNE_RESPONSE",  "cyan4",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "palegreen2",
+                      ifelse(metaphenotype == "STEMNESS", "#006400",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "orchid2",
+                      ifelse(metaphenotype ==  "DNA_REPAIR", "rosybrown",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "deeppink3",
+                      #ifelse(metaphenotype == "STRESS_RESPONSE", "yellow3",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      ifelse(metaphenotype == "CELL_CYCLE",  "#8B5A00",
+                      ifelse(metaphenotype == "METABOLISM", "lightpink",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "orange",
+                               ""
+                               ))))))))))))) %>%
+  pull(color) %>%
+  as.character()
+
+fsize <- 6
+width <- 2
+
+
+
+#MAKE HEATMAP
+hmapGSEA <- Heatmap(heat2,
+        name = "Enrichment", 
+        col = myCol,
+        #column_title = GetoptLong::qq("Enrichment Scores for @{nrow(heat2)} Pathways"),
+        #column_title = GetoptLong::qq(""),
+        top_annotation = column_ha,
+        column_title_gp = gpar(fontsize = 5),
+        row_title_gp = gpar(fontsize = 5),
+        cluster_columns = F,
+        #cluster_rows = as.dendrogram(d),
+        #column_names_gp = gpar(fontsize = 12),
+        show_row_names = F,
+        show_column_dend = F,
+        show_column_names = F,
+        column_split = c(rep(1:2, each = 9)),
+        column_gap = unit(1, "mm"),
+        row_split = c(rep(1, each = length(GF_SIGNALING)), 
+                      rep(2, each = length(IMMUNE_RESPONSE)), 
+                      rep(3, each = length(GPCR_SIGNALING)), 
+                      rep(4, each = length(STEMNESS)), 
+                      rep(5, each = length(TF_ACTIVITY)),
+                      rep(6, each = length(DNA_REPAIR)),
+                      rep(7, each = length(TP53_SIGNALING)),
+                      #rep(5, each = length(STRESS_RESPONSE)),
+                      rep(8, each = length(ANTI.APOPTOSIS)),
+                      rep(9, each = length(APOPTOSIS)),
+                      rep(10, each = length(CELL_CYCLE)),
+                      rep(11, each = length(METABOLISM)),
+                      rep(12, each = length(RHO_GTPASE_SIGNALING))),
+        row_gap = unit(2, "mm"),
+        cluster_rows = F,
+        row_names_centered = T,
+        heatmap_legend_param = list(labels_gp = gpar(fontsize = 6),
+                                    title_gp = gpar(fontsize = 6),
+                                    legend_gp = gpar(fontsize = 6),
+                                    legend_height = unit(0.5, "mm")),
+        raster_device = "tiff") +
+  Heatmap(GF_SIGNALING_1 + 0,
+          name = "GF_SIGNALING", col = c("0" = "white", "1" = "#ef3b2c"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#ef3b2c",
+                                 fontface = "bold"), 
+          column_names_rot = 30) +
+  Heatmap(IMMUNE_RESPONSE_1 + 0,
+          name = "IMMUNE_RESPONSE ", col = c("0" = "white", "1" = "#008B8B"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "cyan4",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(GPCR_SIGNALING_1 + 0,
+          name = "GPCR_SIGNALING", col = c("0" = "white", "1" = "#90EE90"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#90EE90",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(STEMNESS_1 + 0,
+          name = "STEMNESS", col = c("0" = "white", "1" = "#006400"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#006400",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TF_ACTIVITY_1 + 0,
+          name = "TF_ACTIVITY", col = c("0" = "white", "1" = "#EE7AE9"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#EE7AE9",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(DNA_REPAIR_1 + 0,
+          name = "DNA_REPAIR", col = c("0" = "white", "1" = "#BC8F8F"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#BC8F8F",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(TP53_SIGNALING_1 + 0,
+          name = "TP53_SIGNALING", col = c("0" = "white", "1" = "#CD1076"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#CD1076",
+                                 fontface = "bold"), column_names_rot = 30) +
+  #Heatmap(STRESS_RESPONSE_1 + 0,
+  #        name = "STRESS_RESPONSE", col = c("0" = "white", "1" = "#CDCD00"),
+  #        show_heatmap_legend = F, width = unit(width, "mm"),
+  #        column_names_gp = gpar(fontsize = fsize, col = "yellow3",
+  #                               fontface = "bold"), column_names_rot = 30) +
+  Heatmap(ANTI.APOPTOSIS_1 + 0, 
+          name = "ANTI.APOPTOSIS", col = c("0" = "white", "1" = "#4A1486"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#4A1486",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(APOPTOSIS_1 + 0, 
+          name = "APOPTOSIS", col = c("0" = "white", "1" = "#0570b0"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#0570b0",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(CELL_CYCLE_1 + 0, 
+          name = "CELL_CYCLE", col = c("0" = "white", "1" = "#8B5A00"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#8B5A00",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(METABOLISM_1 + 0,
+          name = "METABOLISM", col = c("0" = "white", "1" = "#FFB6C1"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "#FFB6C1",
+                                 fontface = "bold"), column_names_rot = 30) +
+  Heatmap(RHO_GTPASE_SIGNALING_1 + 0,
+          name = "RHO_GTPASE_SIGNALING", col = c("0" = "white", "1" = "#FFA500"),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = "orange",
+                                 fontface = "bold"), column_names_rot = 30) +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 4.5, col = tmp.3, fontface = "bold"),
+        padding = unit(1, "mm")),
+        annotation_name_rot = 45) 
+
+f. = function() { 
+#Save plots
+term <- "stateR"
+comp <- "Only"
+setwd(paste0(dir, dir3, "figures"))
+
+#Save heatmap with annotations
+tiff(file = paste(prefix, cellSamples, "ssGSEA", rows, term, comp,
+                  "pathways_complexheatmap_scaled_by_cellLine.tiff", 
+                  sep = "_"), width = 8.5, height = 4, units = "in", res = 300, 
+     compression = "lzw")
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+
+}
+```

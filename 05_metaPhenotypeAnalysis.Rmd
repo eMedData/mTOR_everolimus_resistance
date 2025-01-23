@@ -1,0 +1,2340 @@
+---
+title: "fisher method v8"
+author: "Eric Medina"
+date: "2023-02-01"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(survcomp)
+library(metap)
+library(ggrepel)
+library(ggbreak)
+library(data.table)
+library(conflicted)
+library(patchwork) #to combine plots
+library(ggrepel)
+library(tidyverse)
+
+conflict_prefer_all("dplyr", quiet = T)
+
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "counts/"
+dir2 <- "ssgsea/"
+dir3 <- "metaPhenotypeAnalysis/"
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+#list.files()
+state <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results.txt"),
+                sep = "\t", header = T, quote = "")
+#FUNCTIONS
+#fisher results to dataframe
+fish.meth2df <- function(x) { 
+  x %>%
+    enframe() %>%
+    separate(value, into = c("chisq", "df", "pvalue"), sep = ",") %>%
+    separate(chisq, into = c("junk1", "chisq"), sep = "=") %>%
+    separate(df, into = c("junk2", "df"), sep = "=") %>%
+    separate(pvalue, into = c("junk3", "pvalue"), sep = "=") %>%
+    dplyr::select(-c("junk1", "junk2", "junk3")) %>% 
+    dplyr::mutate_at(vars(chisq, df, pvalue), as.numeric) %>%
+    dplyr::mutate_at(c("chisq", "df", "pvalue"), ~replace_na(., 0)) %>%
+    dplyr::rename("metaphenotype" = "name") %>%
+    as.data.frame()
+  
+}
+
+fish.meth2df_freq1 <- function(x) {
+  x %>%
+    enframe() %>%
+    unnest(value) %>%
+    dplyr::rename("theme" = "name",
+                  "pvalue" = "value") %>%
+    as.data.frame() 
+}
+
+#Combine estimate results to data frame
+comb.est2df <- function(x) { 
+  x %>%
+  enframe() %>%
+  separate(value, into = c("meta.Estimate", "meta.Std.err"), sep = ",") %>%
+  separate(meta.Estimate, into = c("junk1", "meta.Estimate"), sep = "=") %>%
+  separate(meta.Std.err, into = c("junk2", "meta.Std.err"), sep = "=") %>%
+  dplyr::mutate(meta.Std.err = gsub("[)]", "", meta.Std.err)) %>%
+  dplyr::select(-c(junk1, junk2)) %>%
+  dplyr::mutate_at(vars(meta.Estimate, meta.Std.err), as.numeric) %>%
+  dplyr::mutate_at(c("meta.Estimate", "meta.Std.err"), ~replace_na(., 0)) %>%
+  arrange(name)
+}
+
+#Fisher.method
+fMethod = function(x) {
+  pvalue <- pchisq(-2 * sum(log(x)), df=2*length(x),lower=FALSE)
+  df <- 2*length(x)
+  data.f <- data.frame(df = df, pvalue = pvalue)
+}
+
+# Set it globally:
+options(ggrepel.max.overlaps = Inf)
+```
+
+```{r}
+# TERM: stateR - S.DMSO vs R.DMSO
+
+#READ IN LME.MODEL DF WITH BIOLOGICAL THEMES
+set.seed(09062024)
+
+setwd(paste0(dir, dir2, "lmeModelResults/"))
+#list.files()
+state <- fread(file = paste0("COH069_15929R_RNA_",
+                              "everSamples_H.C2_",
+                              "pathways_lme_results_v7.txt"),
+                sep = "\t", header = T, quote = "")
+
+#Filter for comparison
+stateR <- state %>% 
+  filter(!grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  filter(coefficient == "stateeverR",
+         FDR <= 0.05)  
+
+dim(stateR)
+head(stateR)
+
+
+#GET meta-phenotypes
+cat.names <- unique(stateR$metaphenotype)
+
+
+#Get meta-phenotypes with at least 2 pathways
+names <- stateR %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq > 1) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#meta-phenotypes with only 1 pathway
+names1 <- stateR %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq == 1) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#FOR LOOP TO convert pvals from two-tail to one-tail and combine pvals 
+## using fisher's method
+
+ftest_1 <- list()
+#ftest_2 <- list()
+for (i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " meta-phenotype has MORE than 1 gene set"))
+    df.tp <- stateR %>% 
+      dplyr::filter(metaphenotype == i)
+    
+    #Get number of enriched signals for each meta-phenotypes
+    
+    r1 <- df.tp$FDR
+    r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+    r3 <- sumlog(p = r2, log.p = F)
+    ftest_1[[i]] <- r3
+  }
+}
+
+
+#PUT INTO DATAFRAME
+
+#meta-phenotypes with more than 1 gene set
+ftest1 <- fish.meth2df(x = ftest_1)
+
+#join
+ftest3 <- ftest1 %>%
+  dplyr::select(metaphenotype, pvalue) %>%
+  arrange(metaphenotype)
+
+#get names of meta-phenotypes
+names3 <- ftest3 %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#get number of gene sets in each meta-phenotypes
+freq <- stateR %>%
+  dplyr::filter(metaphenotype %in% names3) %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  arrange(metaphenotype)
+
+#join number of gene sets of gene set
+ftest3 <- ftest3 %>%
+  left_join(freq, by = "metaphenotype")
+  
+  
+#CALCULATE DIFFERENCE IN ESTIMATE FOR METAPHENOTYPES
+f.tmp.est.list_1 <- list()
+
+for(i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " meta-phenotype has MORE than 1 gene set"))
+    f.tmp.est <- stateR %>% 
+      dplyr::filter(metaphenotype == i) %>%
+    pull(Estimate)
+    
+  f.tmp.err <- stateR %>% 
+    dplyr::filter(metaphenotype == i) %>%
+    pull(Std.Error)
+  
+  f.tmp.est.list_1[[i]] <- combine.est(x = f.tmp.est, 
+                                       x.se = f.tmp.err, hetero = T)
+  }
+}
+
+##Make data frame
+f.tmp.est.list1 <- comb.est2df(x = f.tmp.est.list_1)
+
+#join data frames
+ftest4 <- f.tmp.est.list1 %>%
+  dplyr::rename("metaphenotype" = "name") %>%
+  dplyr::arrange(metaphenotype) %>%
+  left_join(ftest3, by = "metaphenotype")
+
+
+#Get meta-phenotypes
+table.tmp <- as.data.frame(table(stateR$metaphenotype,
+                                 stateR$enriched))
+table.tmp_2 <- table.tmp %>%
+  rename("metaphenotype" = "Var1",
+         "enriched_2" = "Var2") %>% 
+  pivot_wider(names_from = "enriched_2", values_from = "Freq")
+
+
+#Add enriched label and select pvalue threshold to decide which 
+## meta-phenotypes to label
+ftest4.stateR_all <- ftest4 %>%
+  arrange(metaphenotype) %>%
+  mutate(enriched = ifelse(meta.Estimate > 0, "everR.DMSO", 
+                           "sen.DMSO")) %>%
+  mutate_at(vars(enriched), factor) %>%
+  left_join(table.tmp_2, by = "metaphenotype") %>%
+  mutate(Gene.Set_Amount_Difference = ifelse(enriched == "everR.DMSO",
+                                             everR.DMSO-sen.DMSO, 
+                                             sen.DMSO-everR.DMSO)) %>%
+  as_tibble()
+
+#Filter out metaphenotypes with only one gene set
+ftest4.stateR <- ftest4.stateR_all %>%
+  dplyr::filter(Freq > 1) %>%
+  as_tibble()
+
+
+#Get 90th percentile of metaphenotpyes
+q <- quantile(abs(ftest4.stateR$meta.Estimate),
+         probs = seq(0,1,.10)
+         ) %>% 
+  as.data.frame() %>% 
+  round(., digits = 2)
+
+#everything above 90th percentile
+cat <- ftest4.stateR %>%
+  filter(abs(meta.Estimate) >= q$.[3]) %>% 
+  arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+
+#Volcano Plot of metaphenotypes  
+main.metas <- stateR %>% 
+  select(metaphenotype) %>% 
+  filter(metaphenotype %in% c("GF_SIGNALING", "IMMUNE_RESPONSE", "GPCR_SIGNALING",
+                "TF_ACTIVITY", "TP53_SIGNALING", "TRANSCRIPTION",
+                "ANTI.APOPTOSIS", "METABOLISM", "CELL_CYCLE",  
+                "RHO_GTPASE_SIGNALING", "APOPTOSIS", "DNA_REPAIR")) %>% 
+  unique() %>% 
+  pull(metaphenotype) %>% 
+  as.character()
+
+
+#Add label columns
+ftest4.stateR1 <- ftest4.stateR %>%
+  dplyr::filter(metaphenotype %in% cat) %>%
+  mutate(label = ifelse(metaphenotype %in% cat, "TRUE", "FALSE"),
+        logp = -log(pvalue, base = 10),
+        labelMainMetas = ifelse(metaphenotype %in% main.metas, "TRUE", "FALSE"))
+
+#Get top genes sets to label
+tmp.label1 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  arrange(FDR) %>% slice_head(n = 4) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label1.1 <- stateR %>% 
+  filter(path.info_2 %in% c("PI3K_AKT_MTOR_SIGNALING",
+                             "IGF1R_PATHWAY", "MTOR_PATHWAY",
+                             "ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                             "IGF1MTOR_PATHWAY",
+                             "REGULATION_OF_INSULIN_SECRETION",
+                             "INSULIN_RECEPTOR_RECYCLING",
+                             "INSULIN_SIGNALING_PATHWAY",
+                             "MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                             "SIGNALLING_TO_ERKS", "ERK_PATHWAY"
+                             
+                             )) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label2 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  arrange(desc(Estimate)) %>% slice_head(n = 3) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label3 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  filter(!path.info_2 == paste0("DEPOSITION_OF_NEW_CENPA_CONTAINING_",
+                                "NUCLEOSOMES_AT_THE_CENTROMERE")) %>% 
+  arrange(Estimate) %>% slice_head(n = 3) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label <- c(tmp.label1, tmp.label1.1, 
+               tmp.label2, 
+               tmp.label3)
+
+#Get colors for metaphenotyeps of interest
+mycolor <- stateR %>% 
+  filter(metaphenotype %in% cat) %>% 
+  mutate(color.meta = ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "IMMUNE_RESPONSE",  "cyan4",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "palegreen2",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "orchid2",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "deeppink3",
+                      ifelse(metaphenotype == "TRANSCRIPTION", "#006400",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "METABOLISM", "lightpink",
+                      ifelse(metaphenotype == "CELL_CYCLE",  "#8B5A00",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "orange",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      ifelse(metaphenotype ==  "DNA_REPAIR", "rosybrown",
+                             "grey"))))))))))))) %>% 
+  select(metaphenotype, color.meta) %>% 
+  unique() %>% 
+  arrange(metaphenotype) %>% 
+  pull(color.meta) %>% 
+  as.character()
+
+p1.volcano <- stateR %>% 
+  filter(metaphenotype %in% cat) %>% 
+  mutate(label = ifelse(path.info_2 %in% tmp.label, "True", "False")) %>% 
+  ggplot(mapping = aes(x = Estimate, y = -log(FDR, base = 10))) +
+  geom_point(mapping = aes(color = metaphenotype), 
+             size = 3) +
+  geom_text_repel(mapping = aes(label = ifelse(label == "True", 
+                                               path.info_2, "")),
+                  size = 4, fontface = "bold") +
+  theme_classic() +
+  theme(legend.text = element_text(size = 11, face = "bold"),
+        legend.title = element_text(size = 11, face = "bold"),
+        plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        axis.line = element_line(linewidth = 1),
+        legend.key.size = unit(0.6, "cm")) +
+  scale_color_manual(values = c(mycolor)) +
+  guides(color = guide_legend(title = "Metaphenotype", 
+                              override.aes = list(size = 3),
+                              ncol = 1)) +
+  labs(title = paste0("<- Enriched in Sensitive Pre-treatment / ", 
+                      "Encriched in EverR Pre-treatment ->")) +
+  xlab(label = "ssGSEA Enrichment") +
+  ylab(label = "-log10(FDR)") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))
+p1.volcano
+
+#Plot
+ftest4.stateR1$enriched <- relevel(as.factor(ftest4.stateR1$enriched), 
+                                   ref = "sen.DMSO")
+str(ftest4.stateR1)
+
+mycolors <- c("#1E90FF", "#8B0A50")
+names(mycolors) <- c("sen.DMSO", "everR.DMSO")
+
+
+#Plot with all labels
+p1 <- ftest4.stateR1 %>% 
+  ggplot(mapping = aes(x = meta.Estimate, y = -log10(pvalue),
+   label=ifelse(label == TRUE, as.character(metaphenotype),""))) + #all Labels
+  geom_point(mapping = aes(size = meta.Std.err, fill = enriched),
+             alpha = 0.55, pch=21) + 
+  geom_text_repel(mapping = aes(color = enriched),
+                  hjust = .4, vjust = -1, size = 4, 
+                  box.padding = 0.1, alpha = 2, show.legend = F) +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  xlab("Meta-Phenotype Enrichment") +
+  ylab("-log10(Meta-FDR)") +
+  theme(axis.text.x = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 16),
+        axis.title = element_text(face = "bold"),
+        legend.title=element_text(size=12),
+        axis.title.x = element_text(hjust = 0.45, face = "bold")) +
+  guides(fill = guide_legend(override.aes = list(size = 6)),
+         size = guide_legend(override.aes = list(fill = "black"))) +
+  scale_size_continuous(range=c(4,9)) +
+  scale_y_continuous(limits = c(0, 65),
+                     breaks = seq(0, 65, by = 20),
+                     labels = c(0, seq(20, 65, by = 20)),
+                     expand = c(0, 0, 0, 0)) +
+  xlim(-1, 1) +
+  scale_y_break(breaks = c(25, 35))
+p1
+
+#Plot with Main Metaphenotypes only
+main.metas1 <- c(main.metas)
+
+p1.1 <- ftest4.stateR1 %>% 
+  mutate(labelMainMetas = ifelse(metaphenotype %in% main.metas1, 
+                                 "TRUE", "FALSE")) %>% 
+  ggplot(mapping = aes(x = meta.Estimate, y = -log10(pvalue),
+   label=ifelse(labelMainMetas == TRUE, as.character(metaphenotype),""))) +
+  geom_point(mapping = aes(size = meta.Std.err, fill = enriched),
+             alpha = 0.45, pch=21) + 
+  geom_text_repel(mapping = aes(color = enriched),
+                  hjust = .4, vjust = -1, size = 5.5, point.padding = 0,
+                  box.padding = 0.1, fontface = "bold",
+                  alpha = 2, show.legend = F) +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  xlab("Meta-Phenotype Enrichment") +
+  ylab("-log10(Meta-FDR)") +
+  theme(axis.text.x = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 16),
+        axis.title = element_text(face = "bold"),
+        legend.title=element_text(size=12),
+        axis.title.x = element_text(hjust = 0.45, face = "bold")) +
+  guides(fill = guide_legend(override.aes = list(size = 6)),
+         size = guide_legend(override.aes = list(fill = "black"))) +
+  scale_size_continuous(range=c(4,9)) +
+  scale_y_continuous(limits = c(0, 65),
+                     breaks = seq(0, 65, by = 20),
+                     labels = c(0, seq(20, 65, by = 20)),
+                     expand = c(0, 0, 0, 0)) +
+  xlim(-1, 1) +
+  scale_y_break(breaks = c(25, 35))
+p1.1
+
+#PLOT  for resistant in dmso counting gene sets for 
+## each meta-phenotype
+
+#Isolate only themes enriched in resistant dmso
+cat <- ftest4.stateR1 %>%
+  dplyr::filter(enriched == "everR.DMSO") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#convert to long format
+dat <- ftest4.stateR1 %>% 
+  select(metaphenotype, everR.DMSO, sen.DMSO) %>% 
+  filter(metaphenotype %in% cat) %>% 
+  rename("Res" = "everR.DMSO",
+         "Sen" = "sen.DMSO") %>% 
+  mutate(gap = Res - Sen) %>% 
+  dplyr::group_by(metaphenotype) %>% 
+  mutate(max = max(Res, Sen)) %>% 
+  ungroup() %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap))) 
+
+
+dat_long <- dat %>% 
+  pivot_longer(c(Res, Sen)) %>% 
+  mutate(name2 = ifelse(name == "Sen", "Sensitive", "EverR"))
+
+#plot
+nudge_value <- 0.6
+p.main <- dat_long %>% 
+  ggplot(aes(x = value, y=metaphenotype2)) +
+  geom_line(aes(group=metaphenotype), color="#E7E7E7", linewidth = 3) + 
+  geom_point(aes(color=name2), size=3) +
+  geom_text(aes(label=value, color=name2), size = 7,
+            nudge_x=if_else(
+              dat_long$value == dat_long$max, # if it's the larger value...
+              nudge_value,   # move it to the right of the point
+              -nudge_value), # otherwise, move it to the left of the point
+            hjust=if_else(
+              dat_long$value == dat_long$max, #if it's the larger value
+              0, # left justify
+              1)# otherwise, right justify      
+            ) +
+  geom_text(aes(label = name2, color = name2), 
+            data = . %>% filter(gap==max(gap)),
+            nudge_y = .7, 
+            fontface = "bold",
+            size = 7) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 20, 
+                                   color="black",
+                                   face = "bold"),
+        #axis.text.y.right = element_text(size = 14, face = "bold"),
+        axis.text.x = element_text(color="black", size = 12.5),
+        axis.title = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  labs(x="%",y=NULL) +
+  scale_color_manual(values = c("#8B0A50", "#1E90FF")) +
+  #scale_x_break(c(25,45)) +
+  coord_cartesian(ylim=c(1, ((nrow(dat_long) + 1)/2)), x = c(0,44))
+p.main
+
+#make data frame for side part
+dat_gap <- dat %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap)),
+         #make column for state with max value
+         gap_state_max = ifelse(Res == max, "R", "S"),
+         #format gap values
+         gap_theme = paste0("+", abs(gap), gap_state_max) %>% 
+           fct_inorder()) 
+
+#plot
+p.side <- dat_gap %>% 
+  ggplot(aes(x=gap,y=metaphenotype2)) +
+  geom_text(aes(x=0, label=gap_theme, color=gap_state_max),
+            fontface="bold",
+            size = 7) +
+  annotate(geom = "text", x=0, y = c(0:nrow(dat_gap)), # num of y-axis values
+            label="") +
+  theme_void() +
+  coord_cartesian(ylim=c(1, ((nrow(dat_gap) + 0.5)))) +
+  theme(
+    plot.margin = margin(l=0, r=0, b=0, t = 0), #otherwise it adds too much space
+    panel.background = element_rect(fill="#FFFFFF", color="deeppink4"),
+    legend.position = "none") +
+  scale_color_manual(values = c("deeppink4", "dodgerblue"))
+p.side
+    
+#combine
+p1.loliplot1 <- aplot::plot_list(p.main, p.side, widths = c(6, .9))
+p1.loliplot1
+
+#BARBELL PLOT  for SENSITIVE in DMSO counting gene sets for each theme
+
+#Isolate only themes enriched in resistant dmso
+cat <- ftest4.stateR1 %>%
+  dplyr::filter(enriched == "sen.DMSO") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#convert to long format
+dat <- ftest4.stateR1 %>% 
+  select(metaphenotype, everR.DMSO, sen.DMSO) %>% 
+  filter(metaphenotype %in% cat) %>% 
+  rename("Res" = "everR.DMSO",
+         "Sen" = "sen.DMSO") %>% 
+  mutate(gap = Res - Sen) %>% 
+  dplyr::group_by(metaphenotype) %>% 
+  mutate(max = max(Res, Sen)) %>% 
+  ungroup() %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap))) 
+
+
+dat_long <- dat %>% 
+  pivot_longer(c(Res, Sen)) %>% 
+  mutate(name2 = ifelse(name == "Sen", "Sensitive", "EverR"))
+
+#plot
+nudge_value <- 0.4
+p.main <- dat_long %>% 
+  ggplot(aes(x = value, y=metaphenotype2)) +
+  geom_line(aes(group=metaphenotype), color="#E7E7E7", linewidth = 2.5) + 
+  geom_point(aes(color=name2), size=3) +
+  # data callout
+  geom_text(aes(label=value, color=name2), size = 7,
+            nudge_x=if_else(
+              dat_long$value == dat_long$max, # if it's the larger value...
+              nudge_value,   # move it to the right of the point
+              -nudge_value), # otherwise, move it to the left of the point
+            hjust=if_else(
+              dat_long$value == dat_long$max, #if it's the larger value
+              0, # left justify
+              1)# otherwise, right justify      
+            ) +
+  # legend
+  geom_text(aes(label = name2, color = name2), 
+            data = . %>% filter(gap==min(gap)),
+            nudge_y = .6,
+            nudge_x = 0,
+            fontface = "bold",
+            size = 7) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 20, 
+                                   color="black",
+                                   face = "bold"),
+        #axis.text.y.right = element_text(size = 12, face = "bold"),
+        axis.text.x = element_text(color="black", size = 10),
+        axis.title = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  labs(x="%",y=NULL) +
+  scale_color_manual(values = c("#8B0A50", "#1E90FF")) +
+  coord_cartesian(ylim=c(1, ((nrow(dat_long) + 0.5)/2)), x = c(0,33)) 
+p.main
+
+#make data frame for side part
+dat_gap <- dat %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap)),
+         #make column for state with max value
+         gap_state_max = ifelse(Sen == max, "S", "R"),
+         #format gap values
+         gap_theme = paste0("+", abs(gap), gap_state_max) %>% 
+           fct_inorder()) 
+
+#plot
+p.side <- dat_gap %>% 
+  ggplot(aes(x=gap,y=metaphenotype2)) +
+  geom_text(aes(x=0, label=gap_theme, color=gap_state_max),
+            fontface="bold",
+            size = 6) +
+  annotate(geom = "text", x=0, y=c(0:((nrow(dat_gap) + 0.5))), # num of y-axis values
+            label="",
+            size=5) +
+  theme_void() +
+  coord_cartesian(ylim=c(1, ((nrow(dat_gap) + 0.3)))) +
+  theme(
+    plot.margin = margin(l=0, r=0, b=0, t = 0), #otherwise it adds too much space
+    panel.background = element_rect(fill="#FFFFFF", color="dodgerblue"),
+    legend.position = "none"
+  ) +
+  scale_color_manual(values = c("dodgerblue", "deeppink4"))
+p.side
+
+#combine
+p1.loliplot2 <- aplot::plot_list(p.main, p.side, widths = c(5, .6))
+p1.loliplot2
+
+#SAVE PLOTS
+#.f = function() {
+
+term <- "stateR"
+comp <- "S.vs.R_DMSO"
+tcomp <- paste0(term, "_", comp)
+
+#Save metaphenotype analysis table
+setwd(paste0(dir, "metaPhenotypeAnalysis/"))
+fwrite(ftest4.stateR1, file = paste0(tcomp, "metaphenotypeAnalysis_v7.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+ftest4.stateR1 <- fread(file = paste0(tcomp, "metaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "")
+
+
+#save volcano plot
+p1.volcano
+ggsave(filename = paste0(tcomp,  "_ssGSEA_metaphenotypes_",
+                         "VolcanoPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, "metaPhenotypeAnalysis/figures/"), 
+          units = "in", width = 9.5, height = 8.5, dpi = 300, create.dir = T)
+
+#Save histograms of metaphenotype distributions
+setwd(paste0(dir, "metaPhenotypeAnalysis/figures"))
+tiff(file = paste0("themes_histoplot_", tcomp,
+                  "_meta.estimate_distribution_noFilter_v7.tiff"),  
+     width = 12, height = 8, units = "in", res = 300)
+hist(ftest4.stateR$meta.Estimate, col = "darkgreen", breaks = 8)
+dev.off()
+
+tiff(file = paste0("themes_histoplot", tcomp,
+                  "meta.estimate_distribution_yesFilter_v7.tiff"),  
+     width = 7, height = 5, units = "in", res = 300)
+hist(ftest4.stateR1$meta.Estimate, col = "darkgreen", breaks = 8)
+dev.off()
+
+#Save plot with all metaphenotypes labeled
+p1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_volcanoplot_",
+                         "yesLabels_v7.tiff"), 
+         device = "tiff", path = paste0(dir, dir3, "figures/"), 
+       units = "in", width = 12, height = 9, dpi = 300, create.dir = T)
+
+#Save plot with main metaphenotypes labeled
+p1.1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_volcanoplot_",
+                         "MainMetasLabels_v7.tiff"),
+         device = "tiff", path = paste0(dir, dir3, "figures/"), 
+       units = "in", width = 9, height = 7, dpi = 300, create.dir = T)
+
+#Save lolipop plots
+p1.loliplot1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_everR_",
+                         "barbellPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, dir3,"figures/"), 
+          units = "in", width = 15, height = 12, dpi = 300, create.dir = T)
+p1.loliplot2
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_Sen_",
+                         "barbellPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, "metaPhenotypeAnalysis/figures/"), 
+          units = "in", width = 13, height = 9, dpi = 300, create.dir = T)
+
+#}
+
+
+
+# TERM: stateS - S.ever vs R.ever
+#Remove pathways with "negative regulation" in name 
+tmp <- state %>% 
+  filter(grepl("_NEGATIVE_REGULATION_", Gene_Set)) %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+stateR <- state %>% 
+  filter(coefficient == "statesen",
+         FDR <= 0.05,
+         !Gene_Set %in% tmp)  
+
+dim(stateR)
+head(stateR)
+
+#GET meta-phenotypes
+cat.names <- unique(stateR$metaphenotype)
+
+
+#Get meta-phenotypes with at least 2 pathways
+names <- stateR %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq > 1) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#meta-phenotypes with only 1 pathway
+names1 <- stateR %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq == 1) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#FOR LOOP TO convert pvals from two-tail to one-tail and combine pvals 
+## using fisher's method
+
+ftest_1 <- list()
+#ftest_2 <- list()
+for (i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " meta-phenotype has MORE than 1 gene set"))
+    df.tp <- stateR %>% 
+      dplyr::filter(metaphenotype == i)
+    
+    #Get number of enriched signals for each meta-phenotypes
+    
+    r1 <- df.tp$FDR
+    r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+    r3 <- sumlog(p = r2, log.p = F)
+    #r3 <- fMethod(r2)
+    ftest_1[[i]] <- r3
+  }
+}
+
+
+#PUT INTO DATAFRAME
+
+#themes with more than 1 gene set
+ftest1 <- fish.meth2df(x = ftest_1)
+
+#themes with only 1 gene set
+#ftest2 <- fish.meth2df_freq1(ftest_2) 
+
+#join
+ftest3 <- ftest1 %>%
+  dplyr::select(metaphenotype, pvalue) %>%
+  #full_join(ftest2) %>%
+  arrange(metaphenotype)
+
+#get names of meta-phenotypes
+names3 <- ftest3 %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#get number of gene sets in each meta-phenotypes
+freq <- stateR %>%
+  dplyr::filter(metaphenotype %in% names3) %>%
+  dplyr::group_by(metaphenotype) %>%
+  dplyr::summarise(Freq = n()) %>%
+  arrange(metaphenotype)
+
+#join number of gene sets of gene set
+ftest3 <- ftest3 %>%
+  left_join(freq, by = "metaphenotype")
+  
+  
+#CALCULATE DIFFERENCE IN ESTIMATE FOR METAPHENOTYPES
+f.tmp.est.list_1 <- list()
+#f.tmp.est.list_2 <- list()
+
+for(i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " meta-phenotype has MORE than 1 gene set"))
+    f.tmp.est <- stateR %>% 
+      dplyr::filter(metaphenotype == i) %>%
+    pull(Estimate)
+    
+  f.tmp.err <- stateR %>% 
+    dplyr::filter(metaphenotype == i) %>%
+    pull(Std.Error)
+  
+  f.tmp.est.list_1[[i]] <- combine.est(x = f.tmp.est, 
+                                       x.se = f.tmp.err, hetero = T)
+  }
+}
+
+
+##Make data frame
+f.tmp.est.list1 <- comb.est2df(x = f.tmp.est.list_1)
+
+#join data frames
+ftest4 <- f.tmp.est.list1 %>%
+  dplyr::rename("metaphenotype" = "name") %>%
+  dplyr::arrange(metaphenotype) %>%
+  left_join(ftest3, by = "metaphenotype")
+
+
+#GET BIOLOGICAL THEMES
+table.tmp <- as.data.frame(table(stateR$metaphenotype,
+                                 stateR$enriched))
+table.tmp_2 <- table.tmp %>%
+  rename("metaphenotype" = "Var1",
+         "enriched_2" = "Var2") %>% 
+  pivot_wider(names_from = "enriched_2", values_from = "Freq")
+
+
+#Add enriched label and select pvalue threshold to decide which 
+## meta-phenotypes to label
+ ftest4.stateR_all <- ftest4 %>%
+  arrange(metaphenotype) %>%
+  mutate(enriched = ifelse(meta.Estimate > 0, "sen.ever", 
+                           "everR.ever")) %>%
+  mutate_at(vars(enriched), factor) %>%
+  left_join(table.tmp_2, by = "metaphenotype") %>%
+  mutate(Gene.Set_Amount_Difference = ifelse(enriched == "sen.ever", 
+                                             sen.ever-everR.ever, 
+                                             everR.ever-sen.ever)) %>%
+  as_tibble()
+
+#Filter out metaphenotypes with only one gene set
+ftest4.stateR <- ftest4.stateR_all %>%
+  dplyr::filter(Freq > 1) %>%
+  as_tibble()
+
+#Top 90 percentile
+q <- quantile(abs(ftest4.stateR$meta.Estimate),
+#q <- quantile(abs(ftest4.stateR$pvalue),
+         probs = seq(0, 1, .10)
+         ) %>% 
+  as.data.frame() %>% 
+  round(., digits = 2)
+
+cat <- ftest4.stateR %>%
+  #everything equal or above 20th percentile
+  dplyr::filter(abs(meta.Estimate) > q$.[3]) %>% 
+  dplyr::arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#Get main metaphenotypes for volcano plot
+main.metas <- stateR %>% 
+  select(metaphenotype) %>% 
+  filter(metaphenotype %in% c("GF_SIGNALING", "GPCR_SIGNALING",
+                "TP53_SIGNALING", "AQUAPORIN.MEDIATED_TRANSPORT",
+                "ANTI.APOPTOSIS", "METABOLISM", "POST.TRANSLATION_MODIFICATION",
+                "RHO_GTPASE_SIGNALING", "TF_ACTIVITY", "APOPTOSIS")) %>% 
+  unique() %>% 
+  pull(metaphenotype) %>% 
+  as.character()
+
+ftest4.stateR1 <- ftest4.stateR %>%
+  dplyr::filter(metaphenotype %in% cat) %>%
+  mutate(label = ifelse(metaphenotype %in% cat, "TRUE", "FALSE"),
+         logp = -log(pvalue, base = 10),
+         labelMainMetas = ifelse(metaphenotype %in% main.metas, "TRUE", "FALSE"))
+
+tmp.label1 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  arrange(FDR) %>% slice_head(n = 8) %>% 
+  select(path.info_2) %>% 
+  filter(!path.info_2 %in% c("REGULATION_OF_PYRUVATE_DEHYDROGENASE_PDH_COMPLEX",
+         "SYNTHESIS_OF_PIPS_AT_THE_EARLY_ENDOSOME_MEMBRANE")) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label1.1 <- stateR %>% 
+  filter(path.info_2 %in% c("PI3K_AKT_MTOR_SIGNALING",
+                             "IGF1R_PATHWAY", "MTOR_PATHWAY",
+                             "ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                             "IGF1MTOR_PATHWAY",
+                             "REGULATION_OF_INSULIN_SECRETION",
+                             "INSULIN_RECEPTOR_RECYCLING",
+                             "INSULIN_SIGNALING_PATHWAY",
+                             "MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                             "SIGNALLING_TO_ERKS", "ERK_PATHWAY",
+                             "ESTROGEN_RESPONSE_EARLY", "REACTOME_SIGNALLING_TO_RAS",
+                            "HALLMARK_ESTROGEN_RESPONSE_LATE"
+                             )) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label2 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  arrange(desc(Estimate)) %>% slice_head(n = 5) %>% 
+  select(path.info_2) %>% 
+  filter(!path.info_2 %in% c("REGULATION_OF_PYRUVATE_DEHYDROGENASE_PDH_COMPLEX",
+         "SYNTHESIS_OF_PIPS_AT_THE_EARLY_ENDOSOME_MEMBRANE",
+         paste0("TP53_REGULATES_TRANSCRIPTION_OF_ADDITIONAL_CELL_CYCLE_",
+                "GENES_WHOSE_EXACT_ROLE_IN_THE_P53_PATHWAY_REMAIN_UNCERTAIN"))) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label3 <- stateR %>% 
+  filter(metaphenotype %in% main.metas) %>% 
+  arrange(Estimate) %>% 
+  slice_head(n = 5) %>% 
+  select(path.info_2) %>% 
+  filter(!path.info_2 == paste0("TRANSCRIPTIONAL_REGULATION_BY_THE_",
+                                "AP_2_TFAP2_FAMILY_OF_TRANSCRIPTION_FACTORS")) %>% 
+  pull(path.info_2) %>% 
+  as.character()
+
+tmp.label <- c(tmp.label1, tmp.label1.1, tmp.label2, tmp.label3)
+
+#Get colors for metaphenotyeps of interest
+mycolor <- stateR %>% 
+  filter(metaphenotype %in% cat) %>% 
+  mutate(color.meta = ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "palegreen2",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "deeppink3",
+                      ifelse(metaphenotype == "AQUAPORIN.MEDIATED_TRANSPORT", "#006400",
+                      ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "METABOLISM", "lightpink",
+                      ifelse(metaphenotype == "POST.TRANSLATION_MODIFICATION",  "#8B5A00",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "orange",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "orchid2",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                             "grey"))))))))))) %>% 
+  select(metaphenotype, color.meta) %>% 
+  unique() %>% 
+  arrange(metaphenotype) %>% 
+  pull(color.meta) %>% 
+  as.character()
+
+p1.volcano <- stateR %>% 
+  filter(metaphenotype %in% cat) %>% 
+  mutate(label = ifelse(path.info_2 %in% tmp.label, "True", "False")) %>% 
+  ggplot(mapping = aes(x = -Estimate, y = -log(FDR, base = 10))) +
+  geom_point(mapping = aes(color = metaphenotype), 
+             size = 3) +
+  geom_text_repel(mapping = aes(label = ifelse(label == "True", 
+                                               path.info_2, "")),
+                  size = 4, fontface = "bold") +
+  theme_classic() +
+ theme(legend.text = element_text(size = 11, face = "bold"),
+        legend.title = element_text(size = 11, face = "bold"),
+        plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+        axis.title = element_text(size = 12, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        axis.line = element_line(linewidth = 1),
+        legend.key.size = unit(0.6, "cm")) +
+  scale_color_manual(values = c(mycolor)) +
+  guides(color = guide_legend(title = "Metaphenotype", 
+                              override.aes = list(size = 3),
+                              ncol = 1)) +
+  labs(title = 
+ paste0("<- Enriched in Sensitive Post-treatment / ",
+        "Encriched in EverR Post-treatment->")) +
+  xlab(label = "ssGSEA Enrichment") +
+  ylab(label = "-log10(FDR)") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, .1)))
+p1.volcano
+
+
+#Volcano Plot of metaphenotypes
+ftest4.stateR1$enriched <- relevel(as.factor(ftest4.stateR1$enriched), 
+                                   ref = "sen.ever")
+str(ftest4.stateR1)
+
+mycolors <- c("#00CDCD", "#FF69B4")
+names(mycolors) <- c("sen.ever", "everR.ever")
+
+#Volcano plot of metaphenotypes
+p1 <- ftest4.stateR1 %>% 
+  ggplot(mapping = aes(x = -meta.Estimate, y = -log10(pvalue),
+                              label=ifelse(label == TRUE, 
+                               as.character(metaphenotype),"")
+                              ))+
+  geom_point(mapping = aes(size = meta.Std.err, fill = enriched),
+             alpha = 0.55, pch=21) + 
+  geom_text_repel(mapping = aes(color = enriched), hjust = .4, vjust = -1,
+                  size = 4, box.padding = 0.1, alpha = 2, show.legend = F) +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  xlab("Meta-Phenotype Enrichment") +
+  ylab("-log10(Meta-FDR)") +
+  theme(axis.text.x = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 16),
+        axis.title = element_text(face = "bold"),
+        legend.title=element_text(size=12),
+        axis.title.x = element_text(hjust = 0.45, face = "bold")) +
+  guides(fill = guide_legend(override.aes = list(size = 6)),
+         size = guide_legend(override.aes = list(fill = "black"))) +
+  scale_size_continuous(range=c(4,9)) +
+  scale_y_continuous(limits = c(0, 85),
+                     breaks = seq(0, 85, by = 20),
+                     labels = c(0, seq(20, 85, by = 20)),
+                     expand = c(0, 0, 0, 0)) +
+  xlim(-1, 1) +
+  scale_y_break(breaks = c(25,70)) 
+  
+p1
+
+#Plot with Main Metaphenotypes only
+main.metas1 <- c(main.metas, "AQUAPORIN.MEDIATED_TRANSPORT", 
+                 "POST.TRANSLATION_MODIFICATION")
+
+p1.1 <- ftest4.stateR1 %>% 
+  mutate(labelMainMetas = ifelse(metaphenotype %in% main.metas1, 
+                                 "TRUE", "FALSE")) %>% 
+  ggplot(mapping = aes(x = -meta.Estimate, y = -log10(pvalue),
+   label=ifelse(labelMainMetas == TRUE, as.character(metaphenotype),""))) +
+  geom_point(mapping = aes(size = meta.Std.err, fill = enriched),
+             alpha = 0.45, pch=21) + 
+  geom_text_repel(mapping = aes(color = enriched),
+                  hjust = .4, vjust = -1, size = 5.5, point.padding = 0,
+                  box.padding = 0.1, fontface = "bold",
+                  alpha = 2, show.legend = F) +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  xlab("Meta-Phenotype Enrichment") +
+  ylab("-log10(Meta-FDR)") +
+  theme(axis.text.x = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 16),
+        axis.title = element_text(face = "bold"),
+        legend.title=element_text(size=12),
+        axis.title.x = element_text(hjust = 0.45, face = "bold")) +
+  guides(fill = guide_legend(override.aes = list(size = 6)),
+         size = guide_legend(override.aes = list(fill = "black"))) +
+  scale_size_continuous(range=c(4,9)) +
+  scale_y_continuous(limits = c(0, 80),
+                     breaks = seq(0, 80, by = 20),
+                     labels = c(0, seq(20, 80, by = 20)),
+                     expand = c(0, 0, 0, 0)) +
+  xlim(-1, 1) +
+  scale_y_break(breaks = c(25,70)) 
+p1.1
+
+
+#BARBELL PLOT  for resistant in dmso counting gene sets for 
+## each meta-phenotype
+
+#Isolate only meta phenotypes enriched in resistant ever
+cat <- ftest4.stateR1 %>%
+  #filter(!metaphenotype %in% c("CELL_MIGRATION", "AXON_GUIDANCE")) %>%
+  dplyr::filter(enriched == "everR.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#convert to long format
+dat <- ftest4.stateR1 %>% 
+  select(metaphenotype, everR.ever, sen.ever) %>% 
+  filter(metaphenotype %in% cat) %>% 
+  rename("Res" = "everR.ever",
+         "Sen" = "sen.ever") %>% 
+  mutate(gap = Sen - Res) %>% 
+  group_by(metaphenotype) %>% 
+  mutate(max = max(Sen, Res)) %>% 
+  ungroup() %>% 
+  #filter(!gap == "0") %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap))) 
+
+
+dat_long <- dat %>% 
+  pivot_longer(c(Res, Sen)) %>% 
+  mutate(name2 = ifelse(name == "Sen", "Sensitive", "EverR"))
+
+ord <- dat %>% 
+  as.data.frame() %>% 
+  arrange(max) %>% 
+  pull(metaphenotype) %>% 
+  as.character()
+
+#plot main 
+nudge_value <- 0.7
+p.main <- dat_long %>% 
+  mutate(metaphenotype2 = ordered(metaphenotype2, levels = ord)) %>% 
+  ggplot(aes(x = value, y=metaphenotype2)) +
+  geom_line(aes(group=metaphenotype), color="#E7E7E7", linewidth = 3) + 
+  geom_point(aes(color=name2), size=3) +
+  # data callout
+  geom_text(aes(label=value, color=name2), size = 7,
+            nudge_x = ifelse(
+              dat_long$value == dat_long$max, # if it's the larger value...
+              nudge_value,   # move it to the right of the point
+              -nudge_value), # otherwise, move it to the left of the point
+            hjust = if_else(
+              dat_long$value == dat_long$max, #if it's the larger value
+              0, # left justify
+              1)# otherwise, right justify      
+            ) +
+  # legend
+  geom_text(aes(label = name2, color = name2), 
+            #data = . %>% filter(gap==min(gap)),
+            data = . %>% filter(gap=="-9"),
+            nudge_y = .6,
+            nudge_x = -.6,
+            fontface = "bold",
+            size = 7) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 20, 
+                                   color="black",
+                                   face = "bold"),
+        axis.text.x = element_text(color="black", size = 12.5),
+        axis.title = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  labs(x="%",y=NULL) +
+  scale_color_manual(values = c("hotpink", "cyan3")) +
+  #extend the y-axis otherwise the legend is cut off
+  coord_cartesian(ylim=c(1, ((nrow(dat_long) + 1)/2)), x = c(0,30))
+p.main
+
+#make data frame for side part
+dat_gap <- dat %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap)),
+         #make column for state with max value
+         gap_state_max = ifelse(Res == max, "R", "S"),
+         #format gap values
+         gap_theme = paste0("+", abs(gap), gap_state_max),
+         metaphenotype2 = ordered(metaphenotype2, levels = ord))
+
+#plot side
+p.side <- dat_gap %>% 
+  ggplot(aes(x=gap,y=metaphenotype2)) +
+  geom_text(aes(x=0, label=gap_theme, color=gap_state_max),
+            fontface="bold",
+            size = 7) +
+  annotate(geom = "text", x=0, y = c(0:((nrow(dat_gap)))), # num of y-axis values
+            label="") +
+  theme_void() +
+  coord_cartesian(ylim=c(1, ((nrow(dat_gap) + 0.5)))) +
+  theme(
+    plot.margin = margin(l=0, r=0, b=0, t = 0), #otherwise it adds too much space
+    panel.background = element_rect(fill="#FFFFFF", color="hotpink"),
+    legend.position = "none"
+  ) +
+  scale_color_manual(values = c("hotpink", "cyan3"))
+p.side
+
+#combine
+p1.loliplot1 <- aplot::plot_list(p.main, p.side, widths = c(6, .8))
+p1.loliplot1
+
+
+#BARBELL PLOT  for SENSITIVE in DMSO counting gene sets for each theme
+
+#Isolate only themes enriched in resistant dmso
+cat <- ftest4.stateR1 %>%
+  dplyr::filter(enriched == "sen.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(metaphenotype) %>%
+  as.character()
+
+#convert to long format
+dat <- ftest4.stateR1 %>% 
+  select(metaphenotype, everR.ever, sen.ever) %>% 
+  filter(metaphenotype %in% cat) %>% 
+  rename("Res" = "everR.ever",
+         "Sen" = "sen.ever") %>% 
+  mutate(gap = Res - Sen) %>% 
+  dplyr::group_by(metaphenotype) %>% 
+  mutate(max = max(Res, Sen)) %>% 
+  ungroup() %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap))) 
+
+
+dat_long <- dat %>% 
+  pivot_longer(c(Res, Sen)) %>% 
+  mutate(name2 = ifelse(name == "Sen", "Sensitive", "EverR"))
+
+#plot
+nudge_value <- 0.6
+p.main <- dat_long %>% 
+  ggplot(aes(x = value, y=metaphenotype2)) +
+  geom_line(aes(group=metaphenotype), color="#E7E7E7", linewidth = 2.5) + 
+  geom_point(aes(color=name2), size=3) +
+  # data callout
+  geom_text(aes(label=value, color=name2), size = 7,
+            nudge_x=if_else(
+              dat_long$value == dat_long$max, # if it's the larger value...
+              nudge_value,   # move it to the right of the point
+              -nudge_value), # otherwise, move it to the left of the point
+            hjust=if_else(
+              dat_long$value == dat_long$max, #if it's the larger value
+              0, # left justify
+              1)# otherwise, right justify      
+            ) +
+  # legend
+  geom_text(aes(label = name2, color = name2), 
+            data = . %>% filter(gap==min(gap)),
+            nudge_y = .4, 
+            nudge_x = -.9,
+            fontface = "bold",
+            size = 7) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.y = element_text(size = 20, 
+                                   color="black",
+                                   face = "bold"),
+        axis.text.x = element_text(color="black", size = 10),
+        axis.title = element_blank(),
+        panel.grid = element_blank()
+        ) +
+  labs(x="%",y=NULL) +
+  scale_color_manual(values = c("hotpink", "cyan3")) +
+  #extend the y-axis otherwise the legend is cut off
+  coord_cartesian(ylim=c(1, ((nrow(dat_long) + 1)/2)), xlim = c(0, 42))
+p.main
+
+#make data frame for side part
+dat_gap <- dat %>% 
+  mutate(metaphenotype2 = forcats::fct_reorder(metaphenotype, abs(gap)),
+         #make column for state with max value
+         gap_state_max = ifelse(Sen == max, "S", "R"),
+         #format gap values
+         gap_theme = paste0("+", abs(gap), gap_state_max) %>% 
+           fct_inorder()) 
+
+#plot
+p.side <- dat_gap %>% 
+  ggplot(aes(x=gap, y=metaphenotype2)) +
+  geom_text(aes(x = 0, label=gap_theme, color = gap_state_max),
+            fontface = "bold", size = 6) +
+  annotate(geom = "text", x=0, y=c(0:(nrow(dat_gap))), # num of y-axis values
+            label="",
+            size=5) +
+  theme_void() +
+  coord_cartesian(ylim=c(1, ((nrow(dat_gap) + 0.5)))) + # needs to match main plot
+  theme(
+    plot.margin = margin(l = 0, r = 0, b = 0, t = 0), #adds too much space
+    panel.background = element_rect(fill="#FFFFFF", color="cyan3"),
+    legend.position = "none") +
+  scale_color_manual(values = c("cyan3", "hotpink"))
+p.side
+
+#combine
+p1.loliplot2 <- aplot::plot_list(p.main, p.side, widths = c(5, .6))
+p1.loliplot2
+
+
+#SAVE PLOTS
+.f = function() {
+
+term <- "stateS"
+comp <- "S.vs.R_ever"
+tcomp <- paste0(term, "_", comp)
+
+#Save metaphenotype analysis table
+setwd(paste0(dir, "metaPhenotypeAnalysis/"))
+fwrite(ftest4.stateR1, file = paste0(tcomp, "metaphenotypeAnalysis_v7.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+ftest4.stateR1 <- fread(file = paste0(tcomp, "metaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "")
+
+#save volcano plot
+p1.volcano
+ggsave(filename = paste0(term, "_", comp,  "_ssGSEA_metaphenotypes_",
+                         "VolcanoPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, "metaPhenotypeAnalysis/figures/"), 
+          units = "in", width = 9.5, height = 9, dpi = 300, create.dir = T)
+
+#Save histograms of metaphenotype distributions
+setwd(paste0(dir, "metaPhenotypeAnalysis/figures"))
+tiff(file = paste0("themes_histoplot_", tcomp,
+                  "_meta.estimate_distribution_noFilter_v7.tiff"),  
+     width = 12, height = 8, units = "in", res = 300)
+hist(ftest4.stateR$meta.Estimate, col = "darkgreen", breaks = 8)
+dev.off()
+
+tiff(file = paste0("themes_histoplot_", tcomp,
+                  "_meta.estimate_distribution_yesFilter_v7.tiff"),  
+     width = 7, height = 5, units = "in", res = 300)
+hist(ftest4.stateR1$meta.Estimate, col = "darkgreen", breaks = 8)
+dev.off()
+
+#Save plot with all metaphenotypes labeled
+p1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_volcanoplot_",
+                         "yesLabels_v7.tiff"), 
+         device = "tiff", path = paste0(dir, dir3, "figures/"), 
+       units = "in", width = 12, height = 9, dpi = 300, create.dir = T)
+
+#Save plot with main metaphenotypes labeled
+p1.1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_volcanoplot_",
+                         "MainMetasLabels_v7.tiff"),
+         device = "tiff", path = paste0(dir, dir3, "figures/"), 
+       units = "in", width = 9, height = 7, dpi = 300, create.dir = T)
+
+#Save lolipop plots
+p1.loliplot1
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_everR_",
+                         "barbellPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, dir3,"figures/"), 
+          units = "in", width = 15, height = 12, dpi = 300, create.dir = T)
+p1.loliplot2
+ggsave(filename = paste0(tcomp, "_", cellSamples, "_metaphenotypes_Sen_",
+                         "barbellPlot_v7.tiff"), bg="white",
+         device = "tiff", path = paste0(dir, "metaPhenotypeAnalysis/figures/"), 
+          units = "in", width = 13, height = 9, dpi = 300, create.dir = T)
+}
+```
+
+
+
+
+
+
+```{r}
+#set.seed(0306)
+# TERM: stateS - S.ever vs R.ever
+
+#READ IN LME.MODEL DF WITH BIOLOGICAL THEMES
+
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge", sep = "/"))
+stateS <- xlsx::read.xlsx(file = paste("lme_model", collection.h, collection.c2,
+                         "sig.0.05_v7.xlsx", sep = "_"),
+                    sheetName = "stateS_S.vs.R_ever")
+dim(stateS)
+
+#GET BIOLOGICAL.PROCESS_2 CATEGORIES
+cat.names <- unique(stateS$sub_bio.proc_2)
+
+#SENSITIVE_DMSO
+#themes with more than 1 pathway
+names <- stateS %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq > 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#themes with only 1 pathway
+names1 <- stateS %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq == 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#FOR LOOP TO convert pvals from two-tail to one-tail and combine pvals 
+## using fisher's method
+
+ftest_1 <- list()
+ftest_2 <- list()
+for (i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    df.tp <- stateS %>% 
+      dplyr::filter(sub_bio.proc_2 == i)
+    
+    #Get number of enriched signals for each phenotype
+    
+    r1 <- df.tp$FDR
+    r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+    r3 <- sumlog(p = r2, log.p = F)
+    ftest_1[[i]] <- r3
+    
+    } else {
+      if (i %in% names1) {
+        print(paste0(i, " theme has only 1 gene set"))
+        df.tp <- stateS %>% 
+          dplyr::filter(sub_bio.proc_2 == i)
+        
+        #Get number of enriched signals for each phenotype
+        
+        r1 <- df.tp$FDR
+        r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+        ftest_2[[i]] <- r2
+        }
+      }
+}
+
+#PUT INTO DATAFRAME
+
+#themes with more than 1 gene set
+ftest1 <- fish.meth2df(x = ftest_1)
+#themes with only 1 gene set
+ftest2 <- fish.meth2df_freq1(ftest_2) 
+
+#join
+ftest3 <- ftest1 %>%
+  dplyr::select(theme, pvalue) %>%
+  full_join(ftest2) %>%
+  arrange(theme)
+
+#get names of themes
+names3 <- ftest3 %>%
+  pull(theme) %>%
+  as.character()
+
+#get number of gene sets in each theme
+freq <- stateS %>%
+  dplyr::filter(sub_bio.proc_2 %in% names3) %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  arrange(sub_bio.proc_2) %>%
+  dplyr::rename("theme" = "sub_bio.proc_2")
+
+#join number of gene sets of gene set
+ftest3 <- ftest3 %>%
+  left_join(freq, by = "theme")
+  
+  
+#Calculate difference in estimate for biological themes
+f.tmp.est.list_1 <- list()
+f.tmp.est.list_2 <- list()
+
+for(i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    f.tmp.est <- stateS %>% 
+      dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Estimate)
+    
+  f.tmp.err <- stateS %>% 
+    dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Std.Error)
+  
+  f.tmp.est.list_1[[i]] <- combine.est(x = f.tmp.est,
+                                       x.se = f.tmp.err, 
+                                       hetero = T)
+  
+  } else {
+    if (i %in% names1) {
+      print(paste0(i, " theme has only 1 gene set"))
+      f.tmp.est <- stateS %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Estimate)
+      
+      f.tmp.err <- stateS %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Std.Error)
+      
+      f.tmp.est.list_2[[i]] <- combine.est(x = f.tmp.est, 
+                                           x.se = f.tmp.err, 
+                                           hetero = T)
+      }
+    }
+}
+
+##Make data frame
+f.tmp.est.list1 <- comb.est2df(x = f.tmp.est.list_1)
+f.tmp.est.list2 <- comb.est2df(x = f.tmp.est.list_2)
+
+#join data frames
+ftest4 <- f.tmp.est.list1 %>%
+  full_join(f.tmp.est.list2) %>%
+  dplyr::rename("theme" = "name") %>%
+  dplyr::arrange(theme) %>%
+  left_join(ftest3)
+
+#.f = function() {
+#GET BIOLOGICAL THEMES
+table.tmp <- as.data.frame(table(stateS$sub_bio.proc_2,
+                                 stateS$enriched))
+table.tmp_2 <- table.tmp %>%
+  rename("theme" = "Var1",
+         "enriched_2" = "Var2") %>% 
+  pivot_wider(names_from = "enriched_2", values_from = "Freq")
+
+.f = function() {
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/", sep = "/"))
+write.xlsx(as.data.frame(table.tmp_2), file = "lme_model_ssgsea_biological.process_enriched_table.xlsx",
+           sheetName = "S.vs.R_DMSO", col.names = T, row.names = F, append = F)
+
+}
+
+
+#table.tmp_2 %>% as.data.frame() %>% dplyr::arrange(theme)
+
+
+#Add enriched label and select pvalue threshold to decide which themes to label
+ftest4.stateS_all <- ftest4 %>%
+  arrange(theme) %>%
+  mutate(enriched = ifelse(meta.Estimate < 0, 
+                           "resistant.ever", "sensitive.ever")) %>%
+  mutate_at(vars(enriched), factor) %>%
+  left_join(table.tmp_2, by = "theme") %>%
+  mutate(Gene.Set_Amount_Difference = ifelse(enriched == "resistant.ever",
+                                             #Freq-sensitive.ever, 
+                                             #Freq-resistant.ever)) %>%
+                                             resistant.ever-sensitive.ever, 
+                                             sensitive.ever-resistant.ever)) %>%
+  as_tibble()
+
+#Filter out themes with only one gene set
+ftest4.stateS <- ftest4.stateS_all %>%
+  dplyr::filter(Freq > 1) %>%
+  as_tibble()
+
+.f = function() {
+top.cat <- ftest4.stateS$theme #For master plot
+table.tmp_2 %>% as.data.frame() %>% dplyr::arrange(theme)
+}
+
+q <- quantile(abs(ftest4.stateS$meta.Estimate),
+         probs = seq(0,1,.10)
+         ) %>% 
+  as.data.frame() %>% 
+  round(., digits = 2)
+
+#Top 80 percentile
+cat <- ftest4.stateS %>%
+  dplyr::filter(abs(meta.Estimate) >= q$.[3]) %>%
+  dplyr::arrange(pvalue) %>%
+  pull(theme) %>%
+  as.character()
+
+ftest4.stateS1 <- ftest4.stateS %>%
+  dplyr::filter(theme %in% cat) %>%
+  dplyr::mutate(label = ifelse(theme %in% cat, "TRUE", "FALSE")) 
+
+.f = function(){
+term <- "stateS"
+comp <- "S.vs.R_ever"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("themes_histoplot", term, comp,
+                  "meta.estimate_distribution_noFilter.tiff", sep = "_"),  
+                  #"yeslabels.tiff", sep = "_"), 
+                  #"nolabels.tiff", sep = "_"), 
+     width = 12, height = 8, units = "in", res = 300)
+hist(-ftest4.stateS$meta.Estimate, col = "royalblue1", breaks = 8)
+dev.off()
+
+tiff(file = paste("themes_histoplot", term, comp,
+                  "meta.estimate_distribution_yesFilter.tiff", sep = "_"),  
+                  #"yeslabels.tiff", sep = "_"), 
+                  #"nolabels.tiff", sep = "_"), 
+     width = 7, height = 5, units = "in", res = 300)
+hist(-ftest4.stateS1$meta.Estimate, col = "royalblue1", breaks = 8)
+dev.off()
+}
+ftest4.stateS1$enriched <- relevel(as.factor(ftest4.stateS1$enriched), 
+                                   ref = "sensitive.ever")
+str(ftest4.stateS)
+
+mycolors <- c("cyan", "hotpink")
+names(mycolors) <- c("sensitive.ever", "resistant.ever")
+
+
+p2 <- ggplot(ftest4.stateS1, mapping = aes(x = -meta.Estimate, 
+                                           y = -log10(pvalue),
+                              label=ifelse(label == TRUE, 
+                               as.character(theme),"")
+                              ))+
+  geom_point(mapping = aes(size = meta.Std.err, fill = enriched),
+             alpha = 0.55, pch=21) + 
+  #geom_text_repel(hjust = .4, vjust = -1, size = 4, 
+  #                mapping = aes(color = enriched),
+  #                box.padding = 0.1,
+  #                alpha = 2, show.legend = F) +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  xlab("Difference in Estimate") +
+  ylab("-log10(combined FDR)") +
+  theme(axis.text.x = element_text(face = "bold", size = 16),
+        axis.text.y = element_text(face = "bold", size = 16),
+        axis.title = element_text(face = "bold", hjust = 0.45),
+        legend.title=element_text(size=12),
+        axis.title.x = element_text(hjust = 0.45)) +
+  guides(fill = guide_legend(override.aes = list(size = 6)),
+         size = guide_legend(override.aes = list(fill = "black"))) +
+  scale_size_continuous(range=c(4,9)) +
+  scale_y_continuous(limits = c(0, 91),
+                     breaks = seq(0, 100, by = 30),
+                     labels = c(0, seq(30, 90, by = 30)),
+                     expand = c(0, 0, 0, 0)) +
+  #scale_y_break(breaks = c(50,70)) #Remove for master plot
+  #scale_y_reverse() +
+  theme(axis.line = element_line()) +
+  xlim(-0.85, 0.71)
+  #ylim(0, 94.24637) +
+  #scale_x_reverse()
+p2
+
+```
+```{r}
+#.f = function() {
+term <- "stateS"
+comp <- "S.vs.R_ever"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("themes_fisher.method.pvalue_volcanoplot", term, comp,
+                  #"yeslabels_master3.tiff", sep = "_"),  
+                  #"yeslabels.tiff", sep = "_"), 
+                  "nolabels.tiff", sep = "_"), 
+     #width = 12, height = 8, units = "in", res = 300)
+     width = 8, height = 7, units = "in", res = 300)
+p2
+dev.off()
+#}
+```
+```{r}
+#Top themes based on combined FDRs
+
+cat <- ftest4.stateS1 %>%
+  dplyr::filter(enriched == "resistant.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(theme) %>%
+  as.character()
+
+ftest4.stateS1.1 <- ftest4.stateS1 %>%
+  dplyr::filter(theme %in% cat) %>%
+  dplyr::select(theme, resistant.ever, sensitive.ever) %>%
+  pivot_longer(! theme, names_to = "enriched", values_to = "number") %>%
+  #dplyr::arrange(pvalue) %>%
+  as.data.frame()
+
+p2.1 <- ggplot(ftest4.stateS1.1, 
+               mapping = aes(x = forcats::fct_infreq(theme, number), 
+                            y = number, 
+                            fill = enriched)) +
+  geom_col(alpha = 0.55, color = "black") +
+  theme_classic() +
+  scale_fill_manual(values = c("hotpink", "cyan")) +
+  #scale_y_break(c(21,29)) +
+  scale_y_break(c(36,54)) +
+  geom_text(mapping = aes(label = number), color = "black", 
+            size = 5, vjust = .5,
+            #hjust = -1, 
+            position = position_dodge(.9)) +
+  coord_flip() +
+  theme(axis.text.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 6, face = "bold", vjust = -3)) +
+  #labs(title = "Top Themes Enriched in Resistant Pre-treatment") +
+  #theme(plot.title = element_text(hjust = 0.5, size = 7, vjust = 1)) +
+  theme(legend.position = "none") +
+  #xlab("Themes") +
+  #ylab("Number of Gene Sets") 
+  xlab("") +
+  ylab("") 
+p2.1
+```
+```{r}
+#Plot
+#.f = function() {
+term <- "stateS"
+comp <- "enriched_R.ever"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("top_themes_fisher.method.pvalue_geom.col", term, comp,
+                   #"yeslabels.tiff", sep = "_"), 
+                   "nolabels_1.tiff", sep = "_"), 
+     #width = 15, height = 10, units = "in", res = 300) 
+    width = 9, height = 7, units = "in", res = 300)
+
+p2.1
+dev.off()
+#}
+```
+```{r}
+#ENRICHED IN SENSITIVE.ever
+
+#Top themes based on combined FDRs
+cat <- ftest4.stateS1 %>%
+  dplyr::filter(enriched == "sensitive.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  pull(theme) %>%
+  as.character()
+
+
+ftest4.stateS1.2 <- ftest4.stateS1 %>%
+  dplyr::filter(theme %in% cat) %>%
+  dplyr::select(theme, resistant.ever, sensitive.ever) %>%
+  pivot_longer(! theme, names_to = "enriched", values_to = "number") %>%
+  as.data.frame()
+
+ftest4.stateS1.2$enriched <- relevel(as.factor(ftest4.stateS1.2$enriched),
+                                     ref = "sensitive.ever")
+p2.2 <- ggplot(ftest4.stateS1.2, 
+               mapping = aes(x = forcats::fct_infreq(theme, number), 
+                            y = number, 
+                            fill = enriched)) +
+  geom_col(alpha = 0.55, color = "black") +
+  theme_classic() +
+  scale_fill_manual(values = c("cyan", "hotpink")) +
+  #scale_y_break(c(21,29)) +
+  scale_y_break(c(10,28)) +
+  geom_text(mapping = aes(label = number), color = "black", 
+            size = 5, vjust = .5,
+            #hjust = -1, 
+            position = position_dodge(.9)) +
+  coord_flip() +
+  theme(axis.text.y = element_text(size = 18, face = "bold"),
+        axis.text.x = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 6, face = "bold", vjust = -3)) +
+  #labs(title = "Top Themes Enriched in Resistant Pre-treatment") +
+  #theme(plot.title = element_text(hjust = 0.5, size = 7, vjust = 1)) +
+  theme(legend.position = "none") +
+  #xlab("Themes") +
+  #ylab("Number of Gene Sets") 
+  xlab("") +
+  ylab("") 
+p2.2
+```
+```{r}
+#Plot
+#.f = function() {
+term <- "stateS"
+comp <- "enriched_S.ever"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("top_themes_fisher.method.pvalue_geom.col", term, comp,
+                   #"yeslabels.tiff", sep = "_"), 
+                   "nolabels_1.tiff", sep = "_"), 
+     #width = 15, height = 10, units = "in", res = 300) 
+     width = 9, height = 7, units = "in", res = 300)
+
+p2.2
+dev.off()
+#}
+```
+
+
+
+
+```{r}
+
+#save
+dat <- list("stateR_R.DMSO.vs.S.DMSO" = ftest4.stateR,
+            "stateS_S.ever.vs.R.ever" = ftest4.stateS)
+
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/", sep = "/"))
+openxlsx::write.xlsx(dat, file = "lme_model_themes_summarized.xlsx", 
+                                            sep = "_")
+```
+
+
+
+```{r}
+# TERM: drugDMSO - R.DMSO vs R.ever
+
+#READ IN LME.MODEL DF WITH BIOLOGICAL THEMES
+
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge", sep = "/"))
+drugDMSO <- xlsx::read.xlsx(file = paste("lme_model", collection.h, collection.c2,
+                         "sig.0.05_v5.xlsx", sep = "_"),
+                    sheetName = "drugDMSO_R.DMSO.vs.R.ever")
+dim(drugDMSO)
+
+#GET BIOLOGICAL.PROCESS_2 CATEGORIES
+cat.names <- unique(drugDMSO$sub_bio.proc_2)
+
+#SENSITIVE_DMSO
+#themes with more than 1 pathway
+names <- drugDMSO %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq > 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#themes with only 1 pathway
+names1 <- drugDMSO %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq == 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#FOR LOOP TO convert pvals from two-tail to one-tail and combine pvals 
+## using fisher's method
+
+ftest_1 <- list()
+ftest_2 <- list()
+for (i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    df.tp <- drugDMSO %>% 
+      dplyr::filter(sub_bio.proc_2 == i)
+    
+    #Get number of enriched signals for each phenotype
+    
+    r1 <- df.tp$FDR
+    r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+    r3 <- sumlog(p = r2, log.p = F)
+    ftest_1[[i]] <- r3
+    
+    } else {
+      if (i %in% names1) {
+        print(paste0(i, " theme has only 1 gene set"))
+        df.tp <- drugDMSO %>% 
+          dplyr::filter(sub_bio.proc_2 == i)
+        
+        #Get number of enriched signals for each phenotype
+        
+        r1 <- df.tp$FDR
+        r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+        ftest_2[[i]] <- r2
+        }
+      }
+}
+
+#PUT INTO DATAFRAME
+
+#themes with more than 1 gene set
+ftest1 <- fish.meth2df(x = ftest_1)
+#themes with only 1 gene set
+ftest2 <- fish.meth2df_freq1(ftest_2) 
+
+
+#join
+ftest3 <- ftest1 %>%
+  dplyr::select(theme, pvalue) %>%
+  full_join(ftest2) %>%
+  arrange(theme)
+
+#get names of themes
+names3 <- ftest3 %>%
+  pull(theme) %>%
+  as.character()
+
+#get number of gene sets in each theme
+freq <- drugDMSO %>%
+  dplyr::filter(sub_bio.proc_2 %in% names3) %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  arrange(sub_bio.proc_2) %>%
+  dplyr::rename("theme" = "sub_bio.proc_2")
+
+#join number of gene sets of gene set
+ftest3 <- ftest3 %>%
+  left_join(freq, by = "theme")
+  
+  
+#Calculate difference in estimate for biological themes
+f.tmp.est.list_1 <- list()
+f.tmp.est.list_2 <- list()
+
+for(i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    f.tmp.est <- drugDMSO %>% 
+      dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Estimate)
+    
+  f.tmp.err <- drugDMSO %>% 
+    dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Std.Error)
+  
+  f.tmp.est.list_1[[i]] <- combine.est(x = f.tmp.est, x.se = f.tmp.err, hetero = T)
+  
+  } else {
+    if (i %in% names1) {
+      print(paste0(i, " theme has only 1 gene set"))
+      f.tmp.est <- drugDMSO %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Estimate)
+      
+      f.tmp.err <- drugDMSO %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Std.Error)
+      
+      f.tmp.est.list_2[[i]] <- combine.est(x = f.tmp.est, x.se = f.tmp.err, hetero = T)
+      }
+    }
+}
+
+##Make data frame
+f.tmp.est.list1 <- comb.est2df(x = f.tmp.est.list_1)
+f.tmp.est.list2 <- comb.est2df(x = f.tmp.est.list_2)
+
+#join data frames
+ftest4 <- f.tmp.est.list1 %>%
+  full_join(f.tmp.est.list2) %>%
+  dplyr::rename("theme" = "name") %>%
+  dplyr::arrange(theme) %>%
+  left_join(ftest3)
+
+#.f = function() {
+#GET BIOLOGICAL THEMES
+table.tmp <- as.data.frame(table(drugDMSO$sub_bio.proc_2,
+                                 drugDMSO$enriched))
+table.tmp_2 <- table.tmp %>%
+  rename("theme" = "Var1",
+         "enriched_2" = "Var2") %>% 
+  pivot_wider(names_from = "enriched_2", values_from = "Freq")
+
+.f = function() {
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/", sep = "/"))
+write.xlsx(as.data.frame(table.tmp_2), file = "lme_model_ssgsea_biological.process_enriched_table.xlsx",
+           sheetName = "R.DMSO.vs.R_ever", col.names = T, row.names = F, append = F)
+
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+
+top.cat <- ftest4 %>%
+  dplyr::filter(pvalue <= 1e-13) %>%
+  dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+#}
+
+top.cat <- c("NOTCH_SIGNALING", "RHO_GTPASE_SIGNALING", "GF_SIGNALING",
+             "INNATE_IMMUNE_RESPONSE", "INSULIN_SIGNALING", "MAPK_SIGNALING",
+             "AMINO.ACID_METABOLISM", "DNA_REPAIR", "GPCR_SIGNALING",
+             "FGFR1_MUTANT_SIGNALING", "RNA_METABOLISM", "SMAD.REGULATED_TRANSCRIPTION",
+             "TNF_SIGNALING", "APC.MEDIATED_CELL.CYCLE_PROTIENS_DEGRADATION", 
+             "CELL.CYCLE_TRANSITION", "DNA_SYNTHESIS", "FGFR2_MUTANT_SIGNALING",
+             "MTOR_SIGNALING", "POST.TRANSLATION_PROTEIN_MODIFICATION",
+             "RNA.POL.I_TRANSCRIPTION", "RNA.POL.II_TRANSCRIPTION", "TLR_SIGNALING",
+             "TRANSPORT_SMALL.MOLECULE", "WNT_SIGNALING")
+}
+
+
+#Add enriched label and select pvalue threshold to decide which themes to label
+ftest4.drugDMSO <- ftest4 %>%
+  arrange(theme) %>%
+  mutate(enriched = ifelse(meta.Estimate > 0, "resistant.DMSO", "resistant.ever")) %>%
+  mutate_at(vars(enriched), factor) %>%
+  left_join(table.tmp_2, by = "theme") %>%
+  mutate(diff.Freq = ifelse(enriched == "resistant.DMSO", 
+                            Freq-resistant.ever, Freq-resistant.DMSO)) %>%
+  as_tibble()
+
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat1 <- ftest4.drugDMSO %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "resistant.ever") %>%
+  dplyr::arrange(meta.Estimate) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat2 <- ftest4.drugDMSO %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "resistant.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat3 <- ftest4.drugDMSO %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "resistant.DMSO") %>%
+  dplyr::arrange(desc(meta.Estimate)) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat4 <- ftest4.drugDMSO %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "resistant.DMSO") %>%
+  dplyr::arrange(pvalue) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+top.cat <- unique(c(top.cat1, top.cat2, top.cat3, top.cat4, "ANTI.APOPTOSIS"))
+
+ftest4.drugDMSO1 <- ftest4.drugDMSO %>%
+  mutate(label = ifelse(theme %in% top.cat, "TRUE", "FALSE")) 
+
+ftest4.drugDMSO$enriched <- relevel(as.factor(ftest4.drugDMSO$enriched), ref = "resistant.DMSO")
+str(ftest4.drugDMSO)
+
+
+mycolors <- c("mediumpurple1", "brown1")
+names(mycolors) <- c("resistant.DMSO", "resistant.ever")
+
+p3 <- ggplot(ftest4.drugDMSO1, mapping = aes(x = -meta.Estimate, y = -log10(pvalue),
+                              label=ifelse(label == TRUE, 
+                               as.character(theme),"")
+                              ))+
+  geom_point(mapping = aes(size = diff.Freq, color = enriched)) + 
+  geom_text_repel(hjust = .4, vjust = -1, size = 2.5, 
+                  mapping = aes(color = enriched),
+                  box.padding = 0.1) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  theme(axis.text.x.bottom = element_text(face = "bold")) +
+  #geom_hline(aes(yintercept = -log10(1e-13)), color = "red", linetype = "dashed") +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  xlim(-1.898401, 1.572769) #+
+  #ylim(0, 121.1824) #+
+  #scale_x_reverse() 
+p3
+```
+
+```{r}
+#Plot
+.f = function() {
+term <- "stateR"
+comp <- "R.vs.S_DMSO"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("themes_fisher.method.pvalue_volcanoplot", term, comp,
+                   "yeslabels.tiff", sep = "_"), 
+                   #"_nolabels.tiff"), 
+                 width = 20, height = 10, units = "in", res = 300) 
+
+p3
+dev.off()
+}
+```
+
+
+```{r}
+# TERM: drugDMSO - R.DMSO vs R.ever
+
+#READ IN LME.MODEL DF WITH BIOLOGICAL THEMES
+
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge", sep = "/"))
+drugever <- xlsx::read.xlsx(file = paste("lme_model", collection.h, collection.c2,
+                         "sig.0.05_v5.xlsx", sep = "_"),
+                    sheetName = "drugever_S.ever.vs.S.DMSO")
+dim(drugever)
+
+#GET BIOLOGICAL.PROCESS_2 CATEGORIES
+cat.names <- unique(drugever$sub_bio.proc_2)
+
+#SENSITIVE_DMSO
+#themes with more than 1 pathway
+names <- drugever %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq > 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#themes with only 1 pathway
+names1 <- drugever %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  dplyr::filter(Freq == 1) %>%
+  pull(sub_bio.proc_2) %>%
+  as.character()
+
+#FOR LOOP TO convert pvals from two-tail to one-tail and combine pvals 
+## using fisher's method
+
+ftest_1 <- list()
+ftest_2 <- list()
+for (i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    df.tp <- drugever %>% 
+      dplyr::filter(sub_bio.proc_2 == i)
+    
+    #Get number of enriched signals for each phenotype
+    
+    r1 <- df.tp$FDR
+    r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+    r3 <- sumlog(p = r2, log.p = F)
+    ftest_1[[i]] <- r3
+    
+    } else {
+      if (i %in% names1) {
+        print(paste0(i, " theme has only 1 gene set"))
+        df.tp <- drugever %>% 
+          dplyr::filter(sub_bio.proc_2 == i)
+        
+        #Get number of enriched signals for each phenotype
+        
+        r1 <- df.tp$FDR
+        r2 <- two2one(p = r1, two = rep(TRUE, length(r1)), rep(FALSE, length(r1)))
+        ftest_2[[i]] <- r2
+        }
+      }
+}
+
+#PUT INTO DATAFRAME
+
+#themes with more than 1 gene set
+ftest1 <- fish.meth2df(x = ftest_1)
+#themes with only 1 gene set
+ftest2 <- fish.meth2df_freq1(ftest_2) 
+
+
+#join
+ftest3 <- ftest1 %>%
+  dplyr::select(theme, pvalue) %>%
+  full_join(ftest2) %>%
+  arrange(theme)
+
+#get names of themes
+names3 <- ftest3 %>%
+  pull(theme) %>%
+  as.character()
+
+#get number of gene sets in each theme
+freq <- drugever %>%
+  dplyr::filter(sub_bio.proc_2 %in% names3) %>%
+  dplyr::group_by(sub_bio.proc_2) %>%
+  dplyr::summarise(Freq = n()) %>%
+  arrange(sub_bio.proc_2) %>%
+  dplyr::rename("theme" = "sub_bio.proc_2")
+
+#join number of gene sets of gene set
+ftest3 <- ftest3 %>%
+  left_join(freq, by = "theme")
+  
+  
+#Calculate difference in estimate for biological themes
+f.tmp.est.list_1 <- list()
+f.tmp.est.list_2 <- list()
+
+for(i in cat.names) {
+  print(i)
+  if (i %in% names) {
+    print(paste0(i, " theme has MORE than 1 gene set"))
+    f.tmp.est <- drugever %>% 
+      dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Estimate)
+    
+  f.tmp.err <- drugever %>% 
+    dplyr::filter(sub_bio.proc_2 == i) %>%
+    pull(Std.Error)
+  
+  f.tmp.est.list_1[[i]] <- combine.est(x = f.tmp.est, x.se = f.tmp.err, hetero = T)
+  
+  } else {
+    if (i %in% names1) {
+      print(paste0(i, " theme has only 1 gene set"))
+      f.tmp.est <- drugever %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Estimate)
+      
+      f.tmp.err <- drugever %>% 
+        dplyr::filter(sub_bio.proc_2 == i) %>%
+        pull(Std.Error)
+      
+      f.tmp.est.list_2[[i]] <- combine.est(x = f.tmp.est, x.se = f.tmp.err, hetero = T)
+      }
+    }
+}
+
+##Make data frame
+f.tmp.est.list1 <- comb.est2df(x = f.tmp.est.list_1)
+f.tmp.est.list2 <- comb.est2df(x = f.tmp.est.list_2)
+
+#join data frames
+ftest4 <- f.tmp.est.list1 %>%
+  full_join(f.tmp.est.list2) %>%
+  dplyr::rename("theme" = "name") %>%
+  dplyr::arrange(theme) %>%
+  left_join(ftest3)
+
+#.f = function() {
+#GET BIOLOGICAL THEMES
+table.tmp <- as.data.frame(table(drugever$sub_bio.proc_2,
+                                 drugever$enriched))
+table.tmp_2 <- table.tmp %>%
+  rename("theme" = "Var1",
+         "enriched_2" = "Var2") %>% 
+  pivot_wider(names_from = "enriched_2", values_from = "Freq")
+
+.f = function() {
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/", sep = "/"))
+write.xlsx(as.data.frame(table.tmp_2), file = "lme_model_ssgsea_biological.process_enriched_table.xlsx",
+           sheetName = "R.DMSO.vs.R_ever", col.names = T, row.names = F, append = F)
+
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+
+top.cat <- ftest4 %>%
+  dplyr::filter(pvalue <= 1e-13) %>%
+  dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+#}
+
+top.cat <- c("CELL.CYCLE_TRANSITIO", "APC.MEDIATED_CELL.CYCLE_PROTIENS_DEGRADATION", 
+             "CELL.CYCLE_TRANSITION", "DNA_REPAIR", "DNA_SYNTHESIS", "CREB.REGULATED_TRANSCRIPTION",
+             "FGFR2_MUTANT_SIGNALING", "HEAT.STRESS_RESPONSE", "HEDGEHOG_SIGNALING",
+             "HMOX1_ACTIVITY", "IMMUNE_RESPONSE", "RNA.POL.I_TRANSCRIPTION",
+             "RNA.POL.II_TRANSCRIPTION", "RNA.POL.III_TRANSCRIPTION", 
+             "NFKB_SIGNALING", "RAS_SIGNALING", "AMINO.ACID_METABOLISM", 
+             "MITOTIC.CELL_STAGE", "TGFB_SIGNALING", "WNT_SIGNALING",
+             "CHROMOSOME_MAINTENANCE", "POST.TRANSLATION_PROTEIN_MODIFICATION",
+             "GF_SIGNALING", "TNF_SIGNALING", "NOTCH_SIGNALING", "RHO_GTPASE_SIGNALING")
+}
+
+
+#Add enriched label and select pvalue threshold to decide which themes to label
+ftest4.drugever <- ftest4 %>%
+  arrange(theme) %>%
+  mutate(enriched = ifelse(meta.Estimate > 0, "sensitive.ever", "sensitive.DMSO")) %>%
+  mutate_at(vars(enriched), factor) %>%
+  left_join(table.tmp_2, by = "theme") %>%
+  mutate(diff.Freq = ifelse(enriched == "sensitive.ever", 
+                            Freq-sensitive.DMSO, Freq-sensitive.ever)) %>%
+  as_tibble()
+
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat1 <- ftest4.drugever %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "sensitive.DMSO") %>%
+  dplyr::arrange(meta.Estimate) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat2 <- ftest4.drugever %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "sensitive.DMSO") %>%
+  dplyr::arrange(pvalue) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat3 <- ftest4.drugever %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "sensitive.ever") %>%
+  dplyr::arrange(desc(meta.Estimate)) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+#GET CATEGORICAL VARIABLES W/ STATISTICALLY SIGNIFICANT GEOMETRIC PVALUE
+top.cat4 <- ftest4.drugever %>%
+  as.data.frame() %>%
+  dplyr::select(theme, meta.Estimate, pvalue, enriched) %>%
+  dplyr::filter(enriched == "sensitive.ever") %>%
+  dplyr::arrange(pvalue) %>%
+  slice_head(n = 10) %>%
+  #dplyr::arrange(pvalue)
+  #dplyr::filter(pvalue <= 1e-13) %>%
+  #dplyr::select(theme) %>%
+  pull(theme) %>%
+  as.character()
+
+top.cat <- unique(c(top.cat1, top.cat2, top.cat3, top.cat4, "ANTI.APOPTOSIS"))
+
+ftest4.drugever1 <- ftest4.drugever %>%
+  mutate(label = ifelse(theme %in% top.cat, "TRUE", "FALSE")) 
+
+ftest4.drugever$enriched <- relevel(as.factor(ftest4.drugever$enriched), ref = "sensitive.DMSO")
+str(ftest4.drugever)
+
+mycolors <- c("mediumpurple1", "brown1")
+names(mycolors) <- c("sensitive.DMSO", "sensitive.ever")
+
+p4 <- ggplot(ftest4.drugever1, mapping = aes(x = meta.Estimate, y = -log10(pvalue),
+                           label=ifelse(label == TRUE, as.character(theme),"")
+                              )) +
+  geom_point(
+             mapping = aes(size = diff.Freq, color = enriched),
+             ) + 
+  geom_text_repel(hjust = .4, vjust = -1, 
+                  size = 2.5, 
+                  mapping = aes(color = enriched),
+                  box.padding = 0.1) +
+  scale_color_manual(values = mycolors) +
+  theme_classic() +
+  theme(axis.text.x.bottom = element_text(face = "bold")) +
+  #geom_hline(aes(yintercept = -log10(1e-13)), color = "red", linetype = "dashed") +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  #scale_y_reverse() #+
+  xlim(-1.898401, 1.572769)
+  #ylim(0, 121.1824)
+p4
+```
+
+```{r}
+.f = function() {
+term <- "stateS"
+comp <- "S.vs.R_ever"
+setwd(paste(dir, "ssgsea.gsva/lme_model_merge/figures", sep = "/"))
+tiff(file = paste("themes_fisher.method.pvalue_volcanoplot", term, comp,
+                   "yeslabels.tiff", sep = "_"), 
+                   #"nolabels.tiff", sep = "_"), 
+                 width = 10, height = 8, units = "in", res = 300) 
+p4
+dev.off()
+}
+```
+
+

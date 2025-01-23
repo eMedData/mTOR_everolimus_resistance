@@ -1,0 +1,262 @@
+---
+title: "input for ARACNe"
+author: "Eric Medina"
+date: "2022-09-26"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#Load libraries
+library(data.table)
+library(conflicted)
+library(tidyverse)
+
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "aracneAP/"
+
+#Generate counts for ARACNe-AP
+```
+
+```{r}
+set.seed(09082024)
+
+#Load GO:0003700 DNA-binding transcription factor activity
+
+setwd(dir = paste0(dir, dir1))
+#list.files()
+dna.bind.tf.activity <- read.table(file = "dnaBindingTFActivity_GO_0003700.txt", 
+                                          sep = "\t", header = F, quote = "")
+
+#Rename columns
+dna.bind.tf.activity <- dna.bind.tf.activity %>% 
+  rename(gene.bioentitiy = V1,
+         gene.bioentity.label = V2,
+         type = V3,
+         source = V4) %>%
+  arrange(gene.bioentitiy)
+
+head(dna.bind.tf.activity, 30)
+
+#Rows 1:29 are TF complexes. Change these to individual TF gene names.  
+tmp.tf <- dna.bind.tf.activity %>% 
+  slice_head(n = 29) %>% 
+  separate(gene.bioentity.label, into = c("j1", "j2", "j3"), 
+           sep = "_", remove = F) %>%
+  mutate(j2 = ifelse(j2 == "human", j1, j2)) %>%
+  mutate(j2 = ifelse(j2 == "human-1", j1, j2)) %>%
+  dplyr::select(-j3) %>%
+  separate(j2, into = c("j4", "j5", "j6"), sep = "-", remove = F) %>%
+  dplyr::filter(!gene.bioentity.label == "nf-y_human") %>% 
+  select(j4, j5, j6) %>% 
+  t() %>% 
+  as.vector() %>% 
+  na.omit() %>% 
+  toupper() %>% 
+  as.character() %>% 
+  unique()
+
+#Get remaining TFs 
+tmp.tf1 <- dna.bind.tf.activity %>% 
+  slice_tail(n = 1441) %>% 
+  filter(! row_number() %in% c(7)) %>% #Blank
+  pull(gene.bioentity.label) %>% 
+  as.character() %>% 
+  unique()
+
+#Merge vectors
+merge.tf <- c(tmp.tf, tmp.tf1)
+
+#Put into dataframe
+dna.bind.tf.activity <- data.frame(Gene = merge.tf,
+                        GO = "GO:0003700",
+                        involved.in = "DNA.bindingTranscriptionFactorActivity")
+
+
+#Load GO0003712: transcription coactivator activity
+
+coactivator.activity <- read.table(file = paste0("transcriptionCoActivator",
+                                                 "Activity_GO_0003712.txt"), 
+                                             sep = "\t", header = F, 
+                                             quote = "")
+#Rename columns
+coactivator.activity <- coactivator.activity %>% 
+  rename(gene.bioentitiy = V1,
+         gene.bioentity.label = V2,
+         type = V3,
+         source = V4) %>%
+  arrange(gene.bioentitiy)
+
+head(coactivator.activity)
+
+#Rows 1:29 are TF complexes. Change these to individual TF gene names.  
+tmp.tf <- coactivator.activity %>% 
+  slice_head(n = 2) %>% 
+  separate(gene.bioentity.label, into = c("j1", "j2", "j3"), 
+           sep = "_", remove = F) %>%
+  mutate(j2 = ifelse(j2 == "human", j1, j2)) %>%
+  mutate(j2 = ifelse(j2 == "human-1", j1, j2)) %>%
+  dplyr::select(-j3) %>%
+  separate(j2, into = c("j4", "j5", "j6"), sep = "-", remove = F) %>%
+  dplyr::filter(!gene.bioentity.label == "nf-y_human") %>% 
+  select(j4, j5, j6) %>% 
+  t() %>% 
+  as.vector() %>% 
+  na.omit() %>% 
+  toupper() %>% 
+  as.character() %>% 
+  unique()
+
+#Get remaining TFs 
+tmp.tf1 <- coactivator.activity %>% 
+  slice_tail(n = 285) %>% 
+  pull(gene.bioentity.label) %>% 
+  as.character() %>% 
+  unique()
+
+#Merge vectors
+merge2 <- c(tmp.tf, tmp.tf1)
+
+#Put into dataframe
+coactivator.activity <- data.frame(Gene = merge2,
+                         GO = "GO:0003712",
+                         involved.in = "transcirptionCoactivatorActivity")
+
+#Join dataframes
+tfs.GO <- dna.bind.tf.activity %>%
+  full_join(coactivator.activity, by = colnames(.)) 
+dim(tfs.GO)
+
+
+#Use only DEGs and TFs that are differentially expressed for ARACNe and VIPER
+
+#PRE-TREATMENT
+
+#Read in counts
+setwd(dir = paste0(dir, "counts/filtered/"))
+#list.files()
+lcpm.filt <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                 #"logCPM_filtered_normalized_12518_genes.txt"), #v5
+                                 #"logCPM_filtered_normalized_13153_genes.txt"), #v6
+                                 "logCPM_filtered_normalized_11680_genes.txt"), #v7
+                    sep = "\t", header = T, quote = "")
+
+#Read in lme results 
+setwd(dir = paste0(dir, "degs/lmeModelResults/pre.Treatment/"))
+#list.files()
+coef.genes_s.dmso <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                         "Genes_sen.DMSO_refs_pre.Treatment_",
+                                         #"lme_results_v5.txt"),
+                                         #"lme_results_v6.txt"),
+                                         "lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+#Filter for coefficient and FDR
+coef.genes_s.dmso1 <- coef.genes_s.dmso %>% 
+  filter(coefficient == "stateeverR",
+         FDR <= 0.05
+         ) 
+  
+
+#Get names of significant DEGs pre treatment
+lcpm.filt1 <- lcpm.filt %>%
+  dplyr::filter(gene %in% coef.genes_s.dmso1$Gene) %>%
+  arrange(gene)
+
+row <- nrow(lcpm.filt1)
+
+#Get TFs that are DEGs
+tmp.go.tfs <- tfs.GO %>%
+  dplyr::filter(Gene %in% coef.genes_s.dmso1$Gene)
+
+tmp.go.tfs.names <- tmp.go.tfs %>% 
+  select(Gene)
+
+
+#POST treatment 
+
+#Read in lme results 
+setwd(dir = paste0(dir, "degs/lmeModelResults/post.Treatment/"))
+#list.files()
+coef.genes_r.ever <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                         "Genes_everR.ever_refs_post.Treatment_",
+                                         #"lme_results_v5.txt"), 
+                                         #"lme_results_v6.txt"),
+                                         "lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+#Filter for coefficient and FDR
+coef.genes_r.ever1 <- coef.genes_r.ever %>% 
+  filter(coefficient == "statesen",
+         FDR <= 0.05) 
+  
+
+#Get names of significant DEGs pre treatment
+lcpm.filt2 <- lcpm.filt %>%
+  dplyr::filter(gene %in% coef.genes_r.ever1$Gene) %>%
+  arrange(gene)
+
+row <- nrow(lcpm.filt2)
+
+#Get TFs that are DEGs
+tmp.go.tfs <- tfs.GO %>%
+  dplyr::filter(Gene %in% coef.genes_r.ever1$Gene)
+
+tmp.go.tfs.names2 <- tmp.go.tfs %>% 
+  select(Gene)
+  
+
+#.f = function() {
+#Save counts of DEGs
+setwd(paste0(dir, "aracneAP/preTx/input4"))
+row <- nrow(lcpm.filt1)
+write.table(lcpm.filt1, file = paste(prefix, "logCPM_filtered_normalized", row,
+                                      "DEGs_stateeverR_preTreatment_aracneAP.txt", 
+                                      sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Save list of TFs
+setwd(paste0(dir, "aracneAP/preTx/input4"))
+fwrite(tmp.go.tfs.names, file = "tfs.GO.txt", sep = "\t", row.names = F, 
+       col.names = F, quote = F)
+
+#Save counts of DEGs
+setwd(paste0(dir, "aracneAP/postTx/input4"))
+row <- nrow(lcpm.filt2)
+write.table(lcpm.filt2, file = paste(prefix, "logCPM_filtered_normalized", row,
+                                      "DEGs_statesen_postTreatment_aracneAP.txt", 
+                                      sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+  
+#Save list of TFs
+setwd(paste0(dir, "aracneAP/postTx/input4"))
+fwrite(tmp.go.tfs.names2, file = "tfs.GO.txt", sep = "\t", row.names = F, 
+       col.names = F, quote = F)
+#}
+
+#USE BASH SCRIPT TO RUN ARACNE-AP
+```

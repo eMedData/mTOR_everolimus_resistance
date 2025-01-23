@@ -1,0 +1,1584 @@
+---
+title: "viper 2"
+author: "Eric Medina"
+date: "2023-02-25"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#load viper library
+library(viper)
+library(bcellViper)
+library(janitor)
+library(corto)
+library(data.table)
+library(conflicted)
+library(msigdbr)
+library(GSVA)
+library(foreach)
+library(tidyr)
+library(plyr)
+library(dendextend)
+library(ComplexHeatmap)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "aracneAP/"
+dir2 <- "viper/"
+dir3 <- "metaPhenotypeAnalysis/"
+
+#Resistance regulon enrichment
+```
+
+```{r}
+set.seed(09092024)
+
+.f = function() {
+#MAKE REPOSITORY OF GENE METAPHENOTYPE ANNOTATIONS
+  
+#Get gene sets with gene members
+collection <- c("H", "C2")
+pathways <- foreach(i = collection) %do% {
+  print(i)
+  #Get pathways for collection
+  pathways <- msigdbr(species = "Homo sapiens", category = i) %>%
+  group_by(gs_name)
+  pathways <- split(x = pathways$gene_symbol, f = pathways$gs_name)
+
+}
+names(pathways) <- collection
+#combine lists
+pathways <- c(pathways$H, pathways$C2)
+
+
+#VIPER ANALYSIS
+
+
+#Read in metaphenotype annotations for gene sets
+setwd(dir = paste0(dir, dir3))
+metaphenotype <- fread(file = paste0("hallmark_KEGG_BIOCARTA_REACTOME_gene.sets_",
+                                 "metaphenotype_annotations.txt"),
+                   sep = "\t", header = T, quote = "")
+
+
+#Read in preTx lme results for genes 
+setwd(dir = paste0(dir, "degs/lmeModelResults/pre.Treatment/"))
+#list.files()
+coef.genes_s.dmso <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                         "Genes_sen.DMSO_refs_pre.Treatment_",
+                                         "lme_results.txt"), 
+                                         #"lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+#Filter for coefficient and FDR
+coef.genes_s.dmso1 <- coef.genes_s.dmso %>% 
+  #filter(coefficient == "stateeverR",
+  #       FDR <= 0.05) %>% 
+  pull(Gene) %>% 
+  unique() %>% 
+  as.character()
+
+#Read in postTx lme results for genes
+setwd(dir = paste0(dir, "degs/lmeModelResults/post.Treatment/"))
+coef.genes_r.ever <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                         "Genes_everR.ever_refs_post.Treatment_",
+                                         "lme_results.txt"), 
+                                         #"lme_results_v7.txt"), 
+       sep = "\t", header = T, quote = "")
+
+#Filter for coefficient and FDR
+coef.genes_r.ever1 <- coef.genes_r.ever %>% 
+  #filter(
+  #       coefficient == "statesen",
+  #       FDR <= 0.05) %>% 
+  pull(Gene) %>% 
+  unique() %>% 
+  as.character()
+
+#combine vectors
+genes.list <- c(coef.genes_s.dmso1, coef.genes_r.ever1) %>% unique()
+
+#Annotate genes with metaphenotypes (for loop)
+
+mp.list.full <- list()
+
+keep <- metaphenotype %>%
+  pull(metaphenotype) %>%
+  as.character() %>%
+  unique()
+
+for (i in keep) {
+  print(i)
+  
+  #Filter for metaphenotype and get gene sets
+  tmp. <- metaphenotype %>%
+    dplyr::filter(metaphenotype == i) %>%
+    pull(Gene_Set) %>%
+    as.character()
+
+  #Get genes in all gene sets for each metaphenotype
+  tmp.2 <- pathways %>%
+    enframe() %>%
+    filter(name %in% tmp.) %>%
+    #makes all columns same length
+    mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
+    pivot_wider(names_from = name, values_from = value) %>%
+    unnest(cols = everything()) 
+  
+  #Put genes into vector
+  tmp.2.1 <- unique(as.vector(t(tmp.2)))
+  
+  #put into list
+  mp.list.full[[i]] <- tmp.2.1
+}
+
+#Transform to data frame
+mp.df.full1 <- mp.list.full %>%
+  enframe() %>%
+  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>%
+  pivot_wider(names_from = name, values_from = value) %>%
+  unnest(cols = everything()) %>% 
+  pivot_longer(cols = everything(), names_to = "metaphenotype", 
+               values_to = "Gene") %>% 
+  arrange(Gene) %>% 
+  unique() %>% 
+  na.omit()
+
+dim(mp.df.full1)
+head(mp.df.full1)
+tail(mp.df.full1)
+
+#Save
+.f=function(){
+setwd(dir = paste0(dir, dir3))
+fwrite(mp.df.full1, file = paste0("geneMetaphenotypeAnnotationRepository.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+}
+
+}
+
+
+#PRE-TREATMENT
+#Load expression matrix used to make network.txt file in ARACNe-AP 
+
+#Set strings for aracne directory
+time <- "preTx"
+put1 <- "/input4/"
+#put2 <- "/output5/"
+#put2 <- "/output5.1/"
+#put2 <- "/output6/"
+#put2 <- "/output6.1/"
+put2 <- "/output7/"
+#put2 <- "/output7.1/"
+
+#Set strings for viper directory
+v.time <- "preTx2"
+compar <- "stateR"
+
+setwd(paste0(dir, dir1, time, put1))
+#list.files()
+count.mt <- read.table(file = paste0("COH069_15929R_RNA_logCPM_filtered_",
+                                     #"normalized_4993_DEGs_stateeverR_", (pval)
+                                     #"normalized_3509_DEGs_stateeverR_", #output5
+                                     #"normalized_1913_DEGs_stateeverR_", #output5.1
+                                     #"normalized_3594_DEGs_stateeverR_", #output6
+                                     #"normalized_1907_DEGs_stateeverR_", #output6.1
+                                     "normalized_3394_DEGs_stateeverR_", #output7
+                                     #"normalized_1889_DEGs_stateeverR_", #output7.1
+                                     "preTreatment_aracneAP.txt"),
+                       sep = "\t", header = T, quote = "")
+
+#Make eset object with this counts dataframe after this
+count.mt2 <- count.mt %>%
+  column_to_rownames(var = "gene") %>%
+  as.matrix()
+
+#Load network.txt file generated from ARACNe-AP
+setwd(paste0(dir, dir1, time, put2))
+net <- read.table(file = "network.txt", sep = "\t", header = T, quote = "")
+
+#Remove pvalue column
+net2 <- net %>%
+  dplyr::select(! pvalue)
+
+#save with no row names or col names
+write_delim(net2,
+            file = "network2.txt",
+            na = "NA", append = F, col_names = F, 
+            delim = "\t", quote = "none", escape = "none", eol = "\n")
+
+#Set connection to pre-processed network file
+net3 <- paste0(dir, dir1, time, put2, "network2.txt")
+
+#Make ExpressionSet object for RNAseq data
+
+#make sure this has DEGs for specific phenotype used in ARACNe
+exprs <- count.mt2
+
+class(exprs)
+
+#Annotations
+pData <- count.mt2 %>%
+  colnames() %>%
+  as.data.frame() %>%
+  rename(cellLine = ".") %>%
+  separate(cellLine, into = c("cell", "state", "treatment", "rep", "rep.num"), 
+           sep = "_", remove = F) %>%
+  mutate(rep.num = ifelse(is.na(rep.num), rep, rep.num)) %>%
+  mutate(rep = ifelse(rep == rep.num, "rep", rep)) %>%
+  mutate(treatment = ifelse(treatment == rep, state, treatment)) %>%
+  mutate(state = ifelse(state == treatment, "sens", state)) %>%
+  mutate(cell = as_factor(cell),
+         state = as_factor(state),
+         treatment = as_factor(treatment)) %>%
+  column_to_rownames(var = "cellLine") %>%
+  unite("rep", c(rep, rep.num), sep = "_", remove = T)
+
+all(rownames(pData)==colnames(exprs))
+
+#Metadata
+metadata <- data.frame(labelDescription=
+ c("CellLine Origin",
+ "Phenotypic State",
+ "Drug Treatment",
+ "Replicate"),
+ row.names=c("cell", "state", "treatment", "rep"))
+
+phenoData <- new("AnnotatedDataFrame",
+                 data=pData, varMetadata=metadata)
+
+experimentData <- new("MIAME",
+ name="Eric Medina",
+ lab="Andrea Bild Lab",
+ contact="emedinacastaned@coh.org",
+ title="TF Enrichment Experiment",
+ abstract="ExpressionSet object used for VIPER analysis",
+ url="www.lab.not.exist",
+ other=list(
+ notes="exprs has lcpm values"
+ ))
+
+eset <- ExpressionSet(assayData = exprs,
+                      phenoData = phenoData,
+                      experimentData=experimentData,
+                      annotation = "NovaSeq_S4")
+
+#Make regulon object (Make eset with expressionSet_object.Rmd script)
+regulons <- aracne2regulon(afile = net3,
+                           eset = eset, #made using count.mt2
+                           format = "3col")
+
+#signature <- rowTtest(dset, "description", c("CB", "CC"), "N", 
+#                      alternative = "two.sided") #example
+
+signature <- rowTtest(eset, "state", c("everR"), "sens",  
+                      alternative = "two.sided")
+
+#Estimate z-score values for GES
+signature <- (qnorm(signature$p.value/2, 
+                    lower.tail = FALSE) * sign(signature$statistic))[, 1]
+
+#Generate NULL model
+#nullmodel <- ttestNull(x = x.res, y = y.sen, per = 1000, repos = T,
+#                       seed = 310, cores = 1, verbose = T)
+
+nullmodel <- ttestNull(eset, "state", c("everR"), "sens", per = 1000, repos = T,
+                       seed = 310, verbose = T)
+
+regulons
+
+#Make msVIPER object containing cell context-specific regulatory network, NES
+mrs.pre <- msviper(signature, regulons, nullmodel, verbose = FALSE)
+
+#summary of top regulators
+summary(mrs.pre)
+#summary(mrs$regulon$ZBTB43)
+
+plot(mrs.pre, cex = .7)
+
+
+#Put summary in data frame for all regulators
+df.mrs <- mrs.pre$es
+df.mrs2 <- data.frame(regulon = rownames(df.mrs$nes.bt),
+                      size = df.mrs$size,
+                      nes = df.mrs$nes,
+                      pvalue = df.mrs$p.value
+                      )
+
+#Get statistically significant enriched TFs
+df.mrs2.1 <- df.mrs2 %>%
+  as.data.frame() %>%
+  #rownames_to_column(var = "mr") %>% 
+  mutate(pvalue = round(pvalue, digits = 2)) %>% 
+  #filter(mr %in% c("HNF4G", "SMARCD3", "ZBTB21", "ARID5B")) %>%
+  filter(pvalue <= 0.01,
+         #nes > 0
+         ) %>%
+  #column_to_rownames(var = "mr") %>% 
+  arrange(desc(nes))
+
+dim(df.mrs2.1)
+head(df.mrs2.1)
+
+names <- df.mrs2.1$regulon
+#Plot statistically significant enriched regulons
+plot(mrs.pre, mrs = names)
+
+
+#######
+#Look at TRN from ARACNe output
+#names <- net.mtor$Regulator
+#df.mrs3 <- df.mrs2 %>%
+#  as.data.frame() %>%
+#  dplyr::filter(regulon %in% names) %>%
+#  dplyr::filter(pvalue <= 0.05)
+#view(df.mrs3)
+#######
+
+
+#Leading edge analysis: use regulon gene members for smarcd3 signature
+mrs <- ledge(mrs.pre)
+summary(mrs)
+
+lead.mrs <- mrs$ledge
+
+#Transform list to dataframe
+lead.mrs3 <- lead.mrs %>%
+  enframe() %>%
+  filter(name %in% names) %>%
+  #makes all columns same length
+  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
+  pivot_wider(names_from = name, values_from = value) %>%
+  unnest(cols = everything())
+head(lead.mrs3)
+
+
+#Get candidates
+show <- df.mrs2.1$regulon
+
+#enrichment score for candidates
+nes1 <-  mrs$es$nes
+nes2 <- nes1[names(nes1) %in% show]
+
+#Get pvalues for candidates
+pvalue1 <- mrs$es$p.value
+pvalue2 <- pvalue1[names(pvalue1) %in% show]
+
+#get signaures for regulon members
+sig <- mrs$signature %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  rename("signaure" = "V1") %>%
+  spread(key = gene, value = signaure) %>% 
+  unlist(as.list(.))
+
+#Filter regulon object for candidates
+regulons3 <- regulons[names(regulons) %in% show]
+
+allSMARCD3regulon <- regulons3$SMARCD3$tfmode %>% 
+  as.data.frame() %>% 
+  rename("tfmode" = ".") %>% 
+  rownames_to_column(var = "Target") %>% 
+  mutate(Regulator = "SMARCD3") %>%
+  #pivot_longer(names_from = )
+  pull(Target) %>% 
+  as.character() %>% 
+  c(., "SMARCD3") %>% 
+  as.data.frame() %>% 
+  rename("SMARCD3" = ".")
+
+#Put information into list
+corto.mra.pre <- list(nes = nes2,
+                   pvalue = pvalue2,
+                   sig = signature,
+                   regulon = regulons3)
+
+#Plot with corto
+mraplot(mraobj = corto.mra.pre, mrs = show, 
+        title = "Master Regulator Analysis", pthr = 0.051)
+
+
+#REPARE DATA FOR ENRICHMENT PLOT USING CYTOSCAPE
+
+#First make data frame with resistance regulon gene members annotated with
+## metaphenotypes for selected metaphenotypes
+
+#Read in gene metaphenotype repository 
+setwd(dir = paste0(dir, dir3))
+mp.df.full1 <- fread(file = paste0("geneMetaphenotypeAnnotationRepository.txt"),
+       sep = "\t", header = T, quote = "")
+
+#metaphenotypes of interest
+mp.show <- c("GF_SIGNALING", "IMMUNE_RESPONSE", "GPCR_SIGNALING",
+             "TF_ACTIVITY", "TP53_SIGNALING", 
+             "AQUAPORIN.MEDIATED_TRANSPORT", "TRANSCRIPTION",
+              "ANTI.APOPTOSIS", "METABOLISM", "CELL_CYCLE",  
+             "POST.TRANSLATION_MODIFICATION","RHO_GTPASE_SIGNALING", 
+             "APOPTOSIS", "DNA_REPAIR")
+
+mp.df.full2 <- mp.df.full1 %>%
+  filter(metaphenotype %in% mp.show) %>%
+  arrange(Gene)
+dim(mp.df.full2)
+head(mp.df.full2)
+
+
+#Make dataframe for candidate resistance regulons nes and pvalue
+mr.NES.pre <- data.frame(nes = nes2,
+                     pvalue = pvalue2) %>% 
+  rownames_to_column(var = "mr") %>% 
+  rename("pvalue.NES" = "pvalue")
+
+#Make dataframe for candidate resistance regulons with signature expression
+## for gene members
+sig2 <- sig %>% 
+   as.data.frame() %>%
+   rownames_to_column(var = "Target") %>% 
+   rename("signature" = ".")
+
+
+#For loop to annotate resistance regulon targets/genes with metaphenotypes 
+
+#Get regulator names
+mr.tmp <- data.frame(nes = nes2,
+                   pvalue = pvalue2) %>% 
+  #filter(pvalue <= 0.05) %>% 
+  rownames_to_column(var = "Regulator") %>% 
+  pull(Regulator) %>% 
+  unique() %>% 
+  as.character()
+
+
+#Make list
+net.regulon_list <- list()
+#i <- "SMARCD3"
+
+#Run for loop
+for (i in mr.tmp) {
+  print(i)
+  
+  #Get regulator of interest and targets
+  net.mr.tmp <- net %>%
+  dplyr::filter(Regulator == i) %>% 
+  rename("pvalue.MI" = "pvalue") %>% 
+  arrange(Target)
+  
+  #get NES for MR
+  nes.mr <- mr.NES.pre %>% 
+    filter(mr == i)
+  
+  #get expression signatures for all targets 
+  sig.target <- sig2 %>% 
+    filter(Target %in% net.mr.tmp$Target) %>% 
+    arrange(Target)
+  
+  if (all(net.mr.tmp$Target == sig.target$Target)) {
+    
+    net.mr <- net.mr.tmp %>% 
+      add_column(nes = rep(nes.mr$nes, each = nrow(.)), 
+                 .after = colnames(.)[1]) %>% 
+      add_column(pvalue.NES = rep(nes.mr$pvalue.NES, each = nrow(.)), 
+                 .after = colnames(.)[2]) %>% 
+      add_column(sig = sig.target$sig, 
+                 .after = colnames(.)[4])
+    
+    #Include meta phenotype
+    net.regulon_list[[i]] <- mp.df.full2 %>%
+      filter(Gene %in% net.mr$Target) %>% 
+      rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit()
+
+  } else {
+    print("targets do not match, stop run")
+    stop()
+  }
+  
+} 
+
+net.regulon_df <- ldply(net.regulon_list, .id = NULL)
+
+
+
+#FULL SIGNATURE WITH ALL METAPHENOTYPES FOUND IN THE METAPHENOTYPE ANALYSES
+
+
+#read in preTx metaphenotype analysis
+setwd(paste0(dir, "metaPhenotypeAnalysis/"))
+ftest4.stateR1 <- fread(file = paste0("stateR_S.vs.R_DMSOmetaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  pull(metaphenotype) %>% 
+  unique() %>% 
+  as.character()
+
+#read in postTx metaphenotype analysis
+ftest4.stateR2 <- fread(file = paste0("stateS_S.vs.R_evermetaphenotypeAnalysis_v7.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  pull(metaphenotype) %>% 
+  unique() %>% 
+  as.character()
+
+#Combine
+metaTop <- c(ftest4.stateR1, ftest4.stateR2) %>% unique()
+
+#Filter for metaphenotypes in gene metaphenotype data frame
+mp.df.full.metaAnalysis <- mp.df.full1 %>% 
+  filter(metaphenotype %in% metaTop)
+
+#For loop to annotate regulon targets with metaphenotypes for each regulon
+
+#Make list
+net.regulon_list.all <- list()
+#i <- "SMARCD3"
+
+#Run for loop
+for (i in mr.tmp) {
+  print(i)
+  
+  #Get regulator of interest and targets
+  net.mr.tmp <- net %>%
+  dplyr::filter(Regulator == i) %>% 
+  rename("pvalue.MI" = "pvalue") %>% 
+  arrange(Target)
+  
+  #get NES for MR
+  nes.mr <- mr.NES.pre %>% 
+    filter(mr == i)
+  
+  #get expression signatures for all targets 
+  sig.target <- sig2 %>% 
+    filter(Target %in% net.mr.tmp$Target) %>% 
+    arrange(Target)
+  
+  if (all(net.mr.tmp$Target == sig.target$Target)) {
+    
+    net.mr <- net.mr.tmp %>% 
+      add_column(nes = rep(nes.mr$nes, each = nrow(.)), 
+                 .after = colnames(.)[1]) %>% 
+      add_column(pvalue.NES = rep(nes.mr$pvalue.NES, each = nrow(.)), 
+                 .after = colnames(.)[2]) %>% 
+      add_column(sig = sig.target$sig, 
+                 .after = colnames(.)[4])
+    
+    #Include meta phenotype
+    
+    #Get regulon genes with no assigned metaphenotype
+    tmp.meta.none <- net.mr %>% 
+      filter(!Target %in% mp.df.full.metaAnalysis$Gene) %>% 
+      mutate(metaphenotype = "UnIdentified") %>% 
+      #rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit() 
+    
+    #Merge  and put into list
+    net.regulon_list.all[[i]] <- mp.df.full.metaAnalysis %>%
+      filter(Gene %in% net.mr$Target) %>% 
+      rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit() %>% 
+      full_join(tmp.meta.none, by = colnames(.))
+
+  } else {
+    print("targets do not match, stop run")
+    stop()
+  }
+  
+} 
+
+net.regulon_df.all <- ldply(net.regulon_list.all, .id = NULL)
+
+
+#SAVE PLOTS AND FILES
+
+#.f = function() {
+
+#Save list of regulators and regulons in Viper directory
+setwd(paste0(dir, dir2, v.time))
+write.table(lead.mrs3, file = paste0(prefix, "_VIPER_", v.time, "_leading_edge_",
+                                     #"TOP_ResistantRegulon_candidates_v5.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v5.1.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v6.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v6.1.txt"),
+                                     "TOP_ResistantRegulon_candidates_v7.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v7.1.txt"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Save signature with complete regulon gene members
+write.table(allSMARCD3regulon, file = paste0(prefix, "_VIPER_", v.time, "_All",
+                            #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v5.txt"),
+                            #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v5.1.txt"),         
+                            #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v6.1.txt"),
+                            "RegulonMembers_SMARCD3_ResistantRegulon_candidates_v7.txt"),
+                            #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v7.1.txt"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Save file for cytoscape:Condensed network
+write.table(net.regulon_df, file = paste0(prefix, 
+                                          "_ReisistanceRegulonCandidates_",
+                                          "withAllGeneMembers_",
+                                          "SelectedMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                           #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save smarcd3 resistance regulon filtered for leading edge genes
+#Transform for cytoscape, one-shot encoding for genes/metaphenotypes
+
+tmp <- net.regulon_df %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(Target, metaphenotype) %>% 
+  #slice_head(n=10) %>% 
+  mutate(dummy = 1) %>% 
+  spread(metaphenotype, dummy, fill = 0) #%>% 
+  #column_to_rownames("metaphenotype") %>% 
+  #t() %>% 
+  #as.data.frame() %>% 
+  #rownames_to_column(var = "Target")
+
+#merge one-shot encoding with signature expression
+net.regulon_df1 <- net.regulon_df %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(-c(metaphenotype)) %>% 
+  unique() %>% 
+  left_join(tmp, by = "Target")
+  
+
+write.table(net.regulon_df1, file = paste0(prefix, "_SMARCD3_",
+                                          "ReisistanceRegulonCandidate_",
+                                          #"LeadingEdgeGeneMembersOnly_",
+                                          "AllGeneMembers_",
+                                          "SelectedMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                           #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#net.regulon_df <- fread(file = paste0(prefix, 
+#                                          "_ReisistanceRegulonCandidates_",
+#                                          v.time, ".txt"),
+#            sep = "\t", header = T, quote = "")
+
+
+
+#Save file for cytoscape: FULL SIGNATURE WITH ALL METAPHENOTYPES
+write.table(net.regulon_df.all, file = paste0(prefix, 
+                                          "_ReisistanceRegulonCandidates_",
+                                          "withAllGeneMembers_",
+                                          "preTx.postTxMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                           #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save smarcd3 resistance regulon filtered for leading edge genes
+#Transform for cytoscape, one-shot encoding for genes/metaphenotypes
+tmp <- net.regulon_df.all %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(Target, metaphenotype) %>% 
+  #slice_head(n=10) %>% 
+  mutate(dummy = 1) %>% 
+  spread(metaphenotype, dummy, fill = 0) 
+
+#merge one-shot encoding with signature expression
+net.regulon_df.all1 <- net.regulon_df.all %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(-c(metaphenotype)) %>% 
+  unique() %>% 
+  left_join(tmp, by = "Target")
+  
+
+write.table(net.regulon_df.all1, file = paste0(prefix, "_SMARCD3_",
+                                          "ReisistanceRegulonCandidate_",
+                                          #"LeadingEdgeGeneMembersOnly_",
+                                          "AllGeneMembers_",
+                                          "preTx.postTxMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                           #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+#Save original analysis plot
+setwd(paste0(dir, dir2, v.time, "/figures"))
+tiff(filename = paste(prefix, cellSamples, "ARACNe.VIPER_ResistanceRegulon",
+                #"candidates", compar, v.time, "ViperPlot_v5.tiff", sep = "_"),
+                #"candidates", compar, v.time, "ViperPlot_v5.1.tiff", sep = "_"), 
+                #"candidates", compar, v.time, "ViperPlot_v6.tiff", sep = "_"),
+                #"candidates", compar, v.time, "ViperPlot_v6.1.tiff", sep = "_"),
+                "candidates", compar, v.time, "ViperPlot_v7.tiff", sep = "_"),
+                #"candidates", compar, v.time, "ViperPlot_v7.1.tiff", sep = "_"),
+    compression = "lzw", res = 300, width = 7, height = 4, units = "in")
+plot(mrs, cex = .7)
+dev.off()
+
+#Save corto version plot of analysis
+tiff(filename = paste(prefix, cellSamples, "ARACNe.VIPER_ResistanceRegulon",
+                 #"candidates", compar, v.time, "cortoPlot_v5.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v5.1.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v6.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v6.1.tiff", sep = "_"),
+                 "candidates", compar, v.time, "cortoPlot_v7.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v7.1.tiff", sep = "_"),
+    compression = "lzw", res = 300, width = 10, height = 5, units = "in")
+mraplot(mraobj = corto.mra.pre, mrs = show, 
+        title = "Pre-Treatment: Master Regulator Analysis", pthr = 0.05)
+dev.off()
+
+#}
+
+
+
+#POST-TREATMENT
+#Load expression matrix used to make network.txt file in ARACNe-AP 
+
+#Set strings for aracne directory
+time <- "postTx"
+put1 <- "/input4/"
+#put2 <- "/output5/"
+#put2 <- "/output5.1/"
+#put2 <- "/output6/"
+#put2 <- "/output6.1/"
+put2 <- "/output7/"
+#put2 <- "/output7.1/"
+
+#Set strings for viper directory
+v.time <- "postTx2"
+compar <- "stateS"
+
+setwd(paste0(dir, dir1, time, put1))
+#list.files()
+count.mt <- read.table(file = paste0("COH069_15929R_RNA_logCPM_filtered_",
+                                     #"normalized_3211_DEGs_statesen_",
+                                     #"normalized_5032_DEGs_statesen_",
+                                     #"normalized_3555_DEGs_statesen_", #output5
+                                     #"normalized_1946_DEGs_statesen_", #output5.1
+                                     #"normalized_3641_DEGs_statesen_", #output6
+                                     #"normalized_1954_DEGs_statesen_", #output6.1
+                                     "normalized_3436_DEGs_statesen_", #output7
+                                     #"normalized_1904_DEGs_statesen_", #output7.1
+                                     "postTreatment_aracneAP.txt"),
+                       sep = "\t", header = T, quote = "")
+
+#Make eset object with this counts dataframe after this
+count.mt2 <- count.mt %>%
+  column_to_rownames(var = "gene") %>%
+  as.matrix()
+
+#Load network.txt file generated from ARACNe-AP
+setwd(paste0(dir, dir1, time, put2))
+net <- read.table(file = "network.txt", sep = "\t", header = T, quote = "")
+
+#Remove pvalue column
+net2 <- net %>%
+  dplyr::select(! pvalue)
+
+#save with no row names or col names
+write_delim(net2,
+            file = "network2.txt",
+            na = "NA", append = F, col_names = F, 
+            delim = "\t", quote = "none", escape = "none", eol = "\n")
+
+#Set connection to pre-processed network file
+net3 <- paste0(dir, dir1, time, put2, "network2.txt")
+
+#Make ExpressionSet object for RNAseq data
+
+#make sure this has DEGs for specific phenotype used in ARACNe
+exprs <- count.mt2
+
+class(exprs)
+
+#Annotations
+pData <- count.mt2 %>%
+  colnames() %>%
+  as.data.frame() %>%
+  rename(cellLine = ".") %>%
+  separate(cellLine, into = c("cell", "state", "treatment", "rep", "rep.num"), 
+           sep = "_", remove = F) %>%
+  mutate(rep.num = ifelse(is.na(rep.num), rep, rep.num)) %>%
+  mutate(rep = ifelse(rep == rep.num, "rep", rep)) %>%
+  mutate(treatment = ifelse(treatment == rep, state, treatment)) %>%
+  mutate(state = ifelse(state == treatment, "sens", state)) %>%
+  mutate(cell = as_factor(cell),
+         state = as_factor(state),
+         treatment = as_factor(treatment)) %>%
+  column_to_rownames(var = "cellLine") %>%
+  unite("rep", c(rep, rep.num), sep = "_", remove = T)
+
+all(rownames(pData)==colnames(exprs))
+
+#Metadata
+metadata <- data.frame(labelDescription=
+ c("CellLine Origin",
+ "Phenotypic State",
+ "Drug Treatment",
+ "Replicate"),
+ row.names=c("cell", "state", "treatment", "rep"))
+
+phenoData <- new("AnnotatedDataFrame",
+                 data=pData, varMetadata=metadata)
+
+experimentData <- new("MIAME",
+ name="Eric Medina",
+ lab="Andrea Bild Lab",
+ contact="emedinacastaned@coh.org",
+ title="TF Enrichment Experiment",
+ abstract="ExpressionSet object used for VIPER analysis",
+ url="www.lab.not.exist",
+ other=list(
+ notes="exprs has lcpm values"
+ ))
+
+eset <- ExpressionSet(assayData = exprs,
+                      phenoData = phenoData,
+                      experimentData=experimentData,
+                      annotation = "NovaSeq_S4")
+
+#Make regulon object (Make eset with expressionSet_object.Rmd script)
+
+regulons <- aracne2regulon(afile = net3,
+                           eset = eset, #made using count.mt2
+                           format = "3col")
+
+#signature <- rowTtest(dset, "description", c("CB", "CC"), "N", 
+#                      alternative = "two.sided") #example
+
+signature <- rowTtest(eset, "state", c("everR"), "sens",
+                      alternative = "two.sided")
+
+#Estimate z-score values for GES
+signature <- (qnorm(signature$p.value/2, 
+                    lower.tail = FALSE) * sign(signature$statistic))[, 1]
+
+#Generate NULL model
+#nullmodel <- ttestNull(x = x.res, y = y.sen, per = 1000, repos = T,
+#                       seed = 310, cores = 1, verbose = T)
+
+nullmodel <- ttestNull(eset, "state", c("everR"), "sens", per = 1000, repos = T,
+                       seed = 310, verbose = T)
+
+regulons
+
+#Make msVIPER object containing cell context-specific regulatory network, NES
+mrs.post <- msviper(signature, regulons, nullmodel, verbose = FALSE)
+
+#summary of top regulators
+summary(mrs.post)
+#summary(mrs$regulon$ZBTB43)
+
+plot(mrs.post, cex = .7)
+
+
+#Put summary in data frame for all regulators
+df.mrs <- mrs.post$es
+df.mrs2 <- data.frame(regulon = rownames(df.mrs$nes.bt),
+                      size = df.mrs$size,
+                      nes = df.mrs$nes,
+                      pvalue = df.mrs$p.value
+                      )
+
+#Get statistically significant enriched TFs
+df.mrs2.1 <- df.mrs2 %>%
+  as.data.frame() %>%
+  #rownames_to_column(var = "mr") %>% 
+  #filter(mr %in% c("HNF4G", "ZNF100", "SMARCD3", "ZBTB21", "ARID5B", "JUN")) %>%
+  mutate(pvalue = round(pvalue, digits = 2)) %>% 
+  filter(pvalue <= 0.01,
+         #nes > 0
+         ) %>%
+  #column_to_rownames(var = "mr") %>% 
+  arrange(desc(nes))
+
+dim(df.mrs2.1)
+head(df.mrs2.1)
+
+names <- df.mrs2.1$regulon
+#Plot statistically significant enriched regulons
+plot(mrs.post, mrs = names)
+
+
+#Leading edge analysis
+mrs <- ledge(mrs.post)
+summary(mrs)
+
+lead.mrs <- mrs$ledge
+
+#Transform list to dataframe
+lead.mrs3 <- lead.mrs %>%
+  enframe() %>%
+  filter(name %in% names) %>%
+  #makes all columns same length
+  mutate(value = lapply(value, `length<-`, max(lengths(value)))) %>% 
+  pivot_wider(names_from = name, values_from = value) %>%
+  unnest(cols = everything())
+head(lead.mrs3)
+
+#Get candidates
+show <- df.mrs2.1$regulon
+
+#enrichment score for candidates
+nes1 <-  mrs$es$nes
+nes2 <- nes1[names(nes1) %in% show]
+
+#Get pvalues for candidates
+pvalue1 <- mrs$es$p.value
+pvalue2 <- pvalue1[names(pvalue1) %in% show]
+
+#get signaures for regulon members
+sig <- mrs$signature %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "gene") %>%
+  rename("signaure" = "V1") %>%
+  spread(key = gene, value = signaure) %>% 
+  unlist(as.list(.))
+
+#Filter regulon object for candidates
+regulons3 <- regulons[names(regulons) %in% show]
+
+#Complete regulon signature
+allSMARCD3regulon <- regulons3$SMARCD3$tfmode %>% 
+  as.data.frame() %>% 
+  rename("tfmode" = ".") %>% 
+  rownames_to_column(var = "Target") %>% 
+  mutate(Regulator = "SMARCD3") %>%
+  #pivot_longer(names_from = )
+  pull(Target) %>% 
+  as.character() %>% 
+  c(., "SMARCD3") %>% 
+  as.data.frame() %>% 
+  rename("SMARCD3" = ".")
+
+#Put information into list
+corto.mra.post <- list(nes = nes2,
+                   pvalue = pvalue2,
+                   sig = signature,
+                   regulon = regulons3)
+
+#Plot with corto
+mraplot(mraobj = corto.mra.post, mrs = show, 
+        title = "Master Regulator Analysis", pthr = 0.05)
+
+#REPARE DATA FOR ENRICHMENT PLOT USING CYTOSCAPE
+
+#metaphenotypes of interest
+mp.show
+head(mp.df.full2)
+
+
+#Make dataframe for candidates including nes and pvalue
+mr.NES.post <- data.frame(nes = nes2,
+                     pvalue = pvalue2) %>% 
+  rownames_to_column(var = "mr") %>% 
+  rename("pvalue.NES" = "pvalue")
+
+sig2 <- sig %>% 
+   as.data.frame() %>%
+   rownames_to_column(var = "Target") %>% 
+   rename("signature" = ".")
+
+#For loop to annotate regulon targets with metaphenotypes for each regulon
+
+#Get regulator names
+mr.tmp <- data.frame(nes = nes2,
+                   pvalue = pvalue2) %>% 
+  filter(pvalue <= 0.05) %>% 
+  rownames_to_column(var = "Regulator") %>% 
+  pull(Regulator) %>% 
+  unique() %>% 
+  as.character()
+
+#Make list
+net.regulon_list <- list()
+#i <- "SMARCD3"
+
+#Run for loop
+for (i in mr.tmp) {
+  print(i)
+  
+  #Get regulator of interest and targets
+  net.mr.tmp <- net %>%
+  dplyr::filter(Regulator == i) %>% 
+  rename("pvalue.MI" = "pvalue") %>% 
+  arrange(Target)
+  
+  #get NES for MR
+  nes.mr <- mr.NES.post %>% 
+    filter(mr == i)
+  
+  #get expression signatures for all targets 
+  sig.target <- sig2 %>% 
+    filter(Target %in% net.mr.tmp$Target) %>% 
+    arrange(Target)
+  
+  if (all(net.mr.tmp$Target == sig.target$Target)) {
+    
+    net.mr <- net.mr.tmp %>% 
+      add_column(nes = rep(nes.mr$nes, each = nrow(.)), 
+                 .after = colnames(.)[1]) %>% 
+      add_column(pvalue.NES = rep(nes.mr$pvalue.NES, each = nrow(.)), 
+                 .after = colnames(.)[2]) %>% 
+      add_column(sig = sig.target$sig, 
+                 .after = colnames(.)[4])
+    
+    #Include meta phenotype
+    net.regulon_list[[i]] <- mp.df.full2 %>%
+      filter(Gene %in% net.mr$Target) %>% 
+      rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit()
+
+  } else {
+    print("targets do not match, stop run")
+    stop()
+  }
+  
+} 
+
+net.regulon_df <- ldply(net.regulon_list, .id = NULL)
+
+
+
+#FULL SIGNATURE WITH ALL METAPHENOTYPES
+#For loop to annotate regulon targets with metaphenotypes for each regulon
+
+#Make list
+net.regulon_list.all <- list()
+#i <- "SMARCD3"
+
+#Run for loop
+for (i in mr.tmp) {
+  print(i)
+  
+  #Get regulator of interest and targets
+  net.mr.tmp <- net %>%
+  dplyr::filter(Regulator == i) %>% 
+  rename("pvalue.MI" = "pvalue") %>% 
+  arrange(Target)
+  
+  #get NES for MR
+  nes.mr <- mr.NES.post %>% 
+    filter(mr == i)
+  
+  #get expression signatures for all targets 
+  sig.target <- sig2 %>% 
+    filter(Target %in% net.mr.tmp$Target) %>% 
+    arrange(Target)
+  
+  if (all(net.mr.tmp$Target == sig.target$Target)) {
+    
+    net.mr <- net.mr.tmp %>% 
+      add_column(nes = rep(nes.mr$nes, each = nrow(.)), 
+                 .after = colnames(.)[1]) %>% 
+      add_column(pvalue.NES = rep(nes.mr$pvalue.NES, each = nrow(.)), 
+                 .after = colnames(.)[2]) %>% 
+      add_column(sig = sig.target$sig, 
+                 .after = colnames(.)[4])
+    
+    #Include meta phenotype
+    
+    #Get regulon genes with no assigned metaphenotype
+    tmp.meta.none <- net.mr %>% 
+      filter(!Target %in% mp.df.full.metaAnalysis$Gene) %>% 
+      mutate(metaphenotype = "UnIdentified") %>% 
+      #rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit() 
+    
+    #Merge 
+    net.regulon_list.all[[i]] <- mp.df.full.metaAnalysis %>%
+      filter(Gene %in% net.mr$Target) %>% 
+      rename("Target" = "Gene") %>% 
+      select(Target, metaphenotype) %>% 
+      left_join(net.mr, by = "Target") %>% 
+      na.omit() %>% 
+      full_join(tmp.meta.none, by = colnames(.))
+
+  } else {
+    print("targets do not match, stop run")
+    stop()
+  }
+  
+} 
+
+net.regulon_df.all <- ldply(net.regulon_list.all, .id = NULL)
+
+
+#SAVE PLOTS AND FILES
+
+#.f = function() {
+  
+setwd(paste0(dir, dir2, v.time))
+write.table(lead.mrs3, file = paste0(prefix, "_VIPER_", v.time, "_leading_edge_",
+                                     #"TOP_ResistantRegulon_candidates_v5.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v5.1.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v6.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v6.1.txt"),
+                                     "TOP_ResistantRegulon_candidates_v7.txt"),
+                                     #"TOP_ResistantRegulon_candidates_v7.1.txt"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Save signature with complete regulon gene members
+write.table(allSMARCD3regulon, file = paste0(prefix, "_VIPER_", v.time, "_All",
+                               #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v5.txt"),
+                               #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v5.1.txt"),
+                               #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v6.txt"),
+                               #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v6.1.txt"),
+                               "RegulonMembers_SMARCD3_ResistantRegulon_candidates_v7.txt"),
+                               #"RegulonMembers_SMARCD3_ResistantRegulon_candidates_v7.1.txt"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Save file for cytoscape:Condensed network
+write.table(net.regulon_df, file = paste0(prefix, 
+                                          "_ReisistanceRegulonCandidates_",
+                                          "withAllGeneMembers_",
+                                          "SelectedMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                          #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save smarcd3 resistance regulon filtered for leading edge genes
+#Transform for cytoscape, one-shot encoding for genes/metaphenotypes
+
+tmp <- net.regulon_df %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(Target, metaphenotype) %>% 
+  #slice_head(n=10) %>% 
+  mutate(dummy = 1) %>% 
+  spread(metaphenotype, dummy, fill = 0) #%>% 
+  #column_to_rownames("metaphenotype") %>% 
+  #t() %>% 
+  #as.data.frame() %>% 
+  #rownames_to_column(var = "Target")
+
+#merge one-shot encoding with signature expression
+net.regulon_df1 <- net.regulon_df %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(-c(metaphenotype)) %>% 
+  unique() %>% 
+  left_join(tmp, by = "Target")
+  
+
+write.table(net.regulon_df1, file = paste0(prefix, "_SMARCD3_",
+                                          "ReisistanceRegulonCandidate_",
+                                          #"LeadingEdgeGeneMembersOnly_",
+                                          "AllGeneMembers_",
+                                          "SelectedMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                          #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#net.regulon_df <- fread(file = paste0(prefix, 
+#                                          "_ReisistanceRegulonCandidates_",
+#                                          v.time, ".txt"),
+#            sep = "\t", header = T, quote = "")
+
+
+
+#Save file for cytoscape: FULL SIGNATURE WITH ALL METAPHENOTYPES
+write.table(net.regulon_df.all, file = paste0(prefix, 
+                                          "_ReisistanceRegulonCandidates_",
+                                          "withAllGeneMembers_",
+                                          "postTx.postTxMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                          #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save smarcd3 resistance regulon filtered for leading edge genes
+#Transform for cytoscape, one-shot encoding for genes/metaphenotypes
+tmp <- net.regulon_df.all %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(Target, metaphenotype) %>% 
+  #slice_head(n=10) %>% 
+  mutate(dummy = 1) %>% 
+  spread(metaphenotype, dummy, fill = 0) 
+
+#merge one-shot encoding with signature expression
+net.regulon_df.all1 <- net.regulon_df.all %>% 
+  filter(Regulator == "SMARCD3",
+         #Target %in% lead.mrs3$SMARCD3
+         ) %>% 
+  select(-c(metaphenotype)) %>% 
+  unique() %>% 
+  left_join(tmp, by = "Target")
+  
+
+write.table(net.regulon_df.all1, file = paste0(prefix, "_SMARCD3_",
+                                          "ReisistanceRegulonCandidate_",
+                                          #"LeadingEdgeGeneMembersOnly_",
+                                          "AllGeneMembers_",
+                                          "preTx.postTxMetaphenotypes_",
+                                          #v.time, "_v5.txt"),
+                                          #v.time, "_v5.1.txt"),
+                                          #v.time, "_v6.txt"),
+                                          #v.time, "_v6.1.txt"),
+                                          v.time, "_v7.txt"),
+                                          #v.time, "_v7.1.txt"),
+            sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+#Save original analysis plot
+setwd(paste0(dir, dir2, v.time, "/figures"))
+tiff(filename = paste(prefix, cellSamples, "ARACNe.VIPER_ResistanceRegulon",
+                 #"candidates", compar, v.time, "ViperPlot_v5.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "ViperPlot_v5.1.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "ViperPlot_v6.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "ViperPlot_v6.1.tiff", sep = "_"),
+                 "candidates", compar, v.time, "ViperPlot_v7.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "ViperPlot_v7.1.tiff", sep = "_"),
+    compression = "lzw", res = 300, width = 7, height = 4, units = "in")
+plot(mrs, cex = .7)
+dev.off()
+
+#Save corto version plot of analysis
+tiff(filename = paste(prefix, cellSamples, "ARACNe.VIPER_ResistanceRegulon",
+                 #"candidates", compar, v.time, "cortoPlot_v5.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v5.1.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v6.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v6.1.tiff", sep = "_"),
+                 "candidates", compar, v.time, "cortoPlot_v7.tiff", sep = "_"),
+                 #"candidates", compar, v.time, "cortoPlot_v7.1.tiff", sep = "_"),
+    compression = "lzw", res = 300, width = 10, height = 5, units = "in")
+mraplot(mraobj = corto.mra.post, mrs = show, 
+        title = "Post-Treatment: Master Regulator Analysis", pthr = 0.05)
+dev.off()
+
+#}
+
+
+
+#HEATMAP OF RESISTANCE REGULON CANDIDATES
+
+
+#PICK COLOR FOR HEATMAP
+ramp <- colorRamp(c("darkred", "lightblue", "white"))
+ramp.list <- rgb(ramp(seq(0, 1, length = 10)), max = 255)
+ramp.list
+#barplot(rep(1, 10), axes = FALSE, space = 0, col = ramp.list)
+dark.red <- "#800000"
+white.grey <- "#FFFFFF" #white
+light.blue <- "#B6DCE8" #light blue
+myCol <- colorRampPalette(c(light.blue, white.grey, dark.red))(100)
+myBreaks <- seq(-1.2, 1.2, length.out=101)
+
+#Get MR candidates names
+mra.cand <- mr.NES.pre %>%
+  full_join(mr.NES.post) %>%
+  pull(mr) %>%
+  unique() %>%
+  as.character()
+
+#Get expression of resistance regulon regulators
+setwd(dir = paste0(dir, "counts/filtered/"))
+#list.files()
+lcpm.filt <- fread(file = paste0("COH069_15929R_RNA_everSamples_",
+                                 #"logCPM_filtered_normalized_11680_genes.txt"), 
+                                 #"logCPM_filtered_normalized_12518_genes.txt"), #v5
+                                 #"logCPM_filtered_normalized_13153_genes.txt"), #v6
+                                 "logCPM_filtered_normalized_11680_genes.txt"), #v7
+                    sep = "\t", header = T, quote = "")
+
+heat1 <- lcpm.filt %>%
+  as.data.frame() %>%
+  dplyr::filter(gene %in% mra.cand) %>%
+  column_to_rownames(var = "gene") %>%
+  as.matrix()
+rows <- nrow(heat1)
+
+
+#Scale each cell line individually, then merge
+##This worked well to identify DEGs across cell lines
+c <- heat1[,grepl(pattern = "CAMA", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene")
+
+m <- heat1[,grepl(pattern = "MCF", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene")
+
+t <- heat1[,grepl(pattern = "T47D", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene")
+
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene") %>%
+  left_join(t2, by = "Gene") %>%
+  column_to_rownames(var = "Gene") %>%
+  as.data.frame() %>%
+  dplyr::select(c("CAMA1_DMSO_rep_1", "CAMA1_DMSO_rep_2", "CAMA1_DMSO_rep_3",
+                  "MCF7_DMSO_rep_1", "MCF7_DMSO_rep_2", "MCF7_DMSO_rep_3",
+                  "T47D_DMSO_rep_1", "T47D_DMSO_rep_2", "T47D_DMSO_rep_3",
+                  "CAMA1_everR_DMSO_rep_1", "CAMA1_everR_DMSO_rep_2",
+                  "CAMA1_everR_DMSO_rep_3",
+                  "MCF7_everR_DMSO_rep_1", "MCF7_everR_DMSO_rep_2",
+                  "MCF7_everR_DMSO_rep_3",
+                  "T47D_everR_DMSO_rep_1", "T47D_everR_DMSO_rep_2",
+                  "T47D_everR_DMSO_rep_3",
+                  "CAMA1_ever_rep_1", "CAMA1_ever_rep_2", "CAMA1_ever_rep_3",
+                  "MCF7_ever_rep_1", "MCF7_ever_rep_2", "MCF7_ever_rep_3",
+                  "T47D_ever_rep_1", "T47D_ever_rep_2", "T47D_ever_rep_3",
+                  "CAMA1_everR_ever_rep_1", "CAMA1_everR_ever_rep_2",
+                  "CAMA1_everR_ever_rep_3",
+                  "MCF7_everR_ever_rep_1", "MCF7_everR_ever_rep_2",
+                  "MCF7_everR_ever_rep_3",
+                  "T47D_everR_ever_rep_1", "T47D_everR_ever_rep_2",
+                  "T47D_everR_ever_rep_3"
+                  )) %>%
+  as.matrix()
+
+
+#Reduced name lengths that match order above
+colnames(heat2) <- c(rep("S_DMSO.C", 3),
+                     rep("S_DMSO.M", 3),
+                     rep("S_DMSO.T", 3),
+                     rep("R_DMSO.C", 3),
+                     rep("R_DMSO.M", 3),
+                     rep("R_DMSO.T", 3),
+                     rep("S_ever.C", 3),
+                     rep("S_ever.M", 3),
+                     rep("S_ever.T", 3),
+                     rep("R_ever.C", 3),
+                     rep("R_ever.M", 3),
+                     rep("R_ever.T", 3))
+
+
+#hierarchical clustering for rows
+d <- hclust(dist(heat2, method = 'euclidean'), method = 'ward.D2')
+d <- color_branches(d, k = 2, col = c("turquoise3", "brown1"))
+
+#MAKE MATRIX WITH COLNAMES AS CELL LINES FOR LEGEND
+cells.df <- heat2
+colnames(cells.df)  <- c(rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3),
+                     rep("CAMA1", 3),
+                     rep("MCF7", 3),
+                     rep("T47D", 3))
+
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+treatment.df <- heat2
+colnames(treatment.df)  <- c(rep("DMSO", 18),
+                     #rep("Everolimus", 9),
+                     #rep("DMSO", 9),
+                     rep("Everolimus", 18))
+#MAKE MATRIX WITH COLNAMES AS TREATMENT FOR LEGEND
+state.df <- heat2
+colnames(state.df)  <- c(rep("Sensitive", 9),
+                     rep("Resistant", 9),
+                     rep("Sensitive", 9),
+                     rep("Resistant", 9))
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(treatment.df),
+                               State = colnames(state.df),
+                               col = list(CellLines = c("CAMA1" = "yellow",
+                                                        "MCF7" = "purple",
+                                                        "T47D" = "orange"),
+                                          Treatment = c("DMSO" = "darkgreen",
+                                                        "Everolimus" = "blue"),
+                                          State = c("Sensitive" = "cyan3",
+                                                    "Resistant" = "hotpink3")),
+                               annotation_name_gp= gpar(fontsize = 11),
+                               annotation_height=unit(1.0,"mm"),
+                               #annotation_name_side = "left",
+                               annotation_name_side = "right",
+                               #annotation_name_rot = -180
+                               annotation_legend_param = 
+                                 list(labels_gp = gpar(fontsize = 12),
+                                      title_gp = gpar(fontsize = 12)))
+                               
+
+
+#MAKE HEATMAP
+hmapGSEA <- Heatmap(heat2, name = "Expression (log2CPM)", 
+                    #column_title = GetoptLong::qq("log2cpm for @{nrow(heat2)} DEGs"),
+                    col = myCol,
+                    top_annotation = column_ha,
+                    cluster_columns = F,
+                    show_row_names = T,
+                    show_column_dend = F,
+                    show_column_names = F,
+                    row_dend_width = unit(10, "mm"),
+                    cluster_rows = as.dendrogram(d),
+                    column_split = c(rep(1:4, each = 9)),
+                    column_names_gp = gpar(fontsize = 9),
+                    row_dend_side = c("right"),
+                    row_names_side = c("left"),
+                    row_names_rot = 0,
+                    row_names_centered = T,
+                    row_names_gp = gpar(fontsize = 14),
+                    heatmap_legend_param = list(labels_gp = gpar(fontsize = 10),
+                                    title_gp = gpar(fontsize = 11),
+                                    legend_height = unit(1, "mm")),
+                    raster_device = "tiff")
+.f = function() {
+setwd(paste0(dir, dir2, "figures"))
+#tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v5.tiff",
+#tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v5.1.tiff",
+#tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v6.tiff", 
+#tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v6.1.tiff",
+tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v7.tiff", 
+#tiff(file = paste("mra_candidates_log2cpm_expression_complexheatmap_v7.1.tiff", 
+                  sep = "_"), width = 8, height = 7, units = "in", res = 300)
+draw(hmapGSEA, 
+     heatmap_legend_side = c("right"),
+     merge_legends = T,
+     show_heatmap_legend = TRUE)
+dev.off()
+}
+
+
+#Data frame with metaphenotype color coding in cytoscape
+tmp <- data.frame(metaphenotype = "Uncategorized",
+                  color.meta = "grey")
+meta.col <- metaTop %>% 
+  as.data.frame() %>% 
+  rename("metaphenotype" = ".") %>% 
+  #as.data.frame() %>% 
+  mutate(color.meta = ifelse(metaphenotype == "ANTI.APOPTOSIS", "#4A1486",
+                      ifelse(metaphenotype == "APOPTOSIS", "#0570b0",
+                      ifelse(metaphenotype == "AQUAPORIN.MEDIATED_TRANSPORT", "#006400",
+                      ifelse(metaphenotype == "AXON_GUIDANCE", "#9DFFFF",
+                      ifelse(metaphenotype == "CELL_CYCLE",  "#8B5A00",
+                      ifelse(metaphenotype == "CELL_JUNCTION", "#D66621",
+                      ifelse(metaphenotype == "DNA_REPAIR", "#B6534E",
+                      ifelse(metaphenotype == "ECM_ORGANIZATION", "#C99546",
+                      ifelse(metaphenotype == "ER_GOLGI_TRANSPORT", "#99DA00",
+                      ifelse(metaphenotype == "GF_SIGNALING", "#ef3b2c",
+                      ifelse(metaphenotype == "GPCR_SIGNALING", "#90EE90",
+                      ifelse(metaphenotype == "IMMUNE_RESPONSE",  "#008B8B",
+                      ifelse(metaphenotype == "METABOLISM", "#FFB6C1",
+                      ifelse(metaphenotype == "ORGANELLE_BIOGENESIS", "#E3767B",
+                      ifelse(metaphenotype == "POST.TRANSLATION_MODIFICATION", "#ABC083",
+                      ifelse(metaphenotype == "PROTEIN_LOCALIZATION", "#75B33A",
+                      ifelse(metaphenotype == "RHO_GTPASE_SIGNALING", "#FFA500",
+                      #ifelse(metaphenotype == "RNA_PROCESSING", "#EEE8CD",
+                      ifelse(metaphenotype == "SENSORY_PERCEPTION", "#FCD3BC",
+                      ifelse(metaphenotype == "SLC.MEDIATED_TRANSPORT", "#6CC5CC",
+                      ifelse(metaphenotype == "STRESS_RESPONSE", "#8093E3",
+                      ifelse(metaphenotype == "SYNAPTIC_TRANSMISSION", "#00CC7C",
+                      ifelse(metaphenotype == "TF_ACTIVITY", "#EE7AE9",
+                      ifelse(metaphenotype == "TP53_SIGNALING", "#CD1076",
+                      ifelse(metaphenotype == "TRANSCRIPTION", "#FFFF00",
+                      ifelse(metaphenotype == "TRANSFERRIN.MEDIATED_TRANSPORT",
+                             "#DC7C00",
+                      ifelse(metaphenotype == "TRANSLATION", "#FEC857",
+                      ifelse(metaphenotype == "VESICLE.MEDIATED_TRANSPORT", 
+                             "#85BEBD",
+                             
+                             
+                      #ifelse(metaphenotype == "CELL_MIGRATION", "#BC8F8F",
+                      #ifelse(metaphenotype == "CLATHRIN.MEDIATED_TRANSPORT", 
+                      #          "#80D3B7",
+                      #ifelse(metaphenotype == "STEMNESS", "#FDB781",
+                      #ifelse(metaphenotype == "RNA_PROCESSING", "#FFA1E2",
+                      #ifelse(metaphenotype == "DISEASE", "#EDD8A6", 
+                      #ifelse(metaphenotype == "GAGs_SYNTHESIS", "#D1A65A",
+                      "error")))))))))))))))))))))))))))) %>% 
+  filter(!color.meta == "error") %>% 
+  full_join(tmp, by = colnames(.)) %>% 
+  mutate(exp = rnorm(n = 28))
+
+.f = function() {
+#Make empty plot and place legend  
+setwd(dir = paste0(dir, dir3, "figures"))
+#tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v5.tiff",
+#tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v5.1.tiff",
+#tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v6.tiff",
+#tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v6.1.tiff",
+tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v7.tiff",
+#tiff(filename = "metaphenotypeLegendForFullSMARCD3_Signatures_v7.1.tiff", 
+     width = 7, height = 3, units = "in", compression = "lzw", res = 300)
+base::plot(NULL, xaxt = "n", yaxt = "n", bty = "n", ylab = "", 
+                  xlim = 0:1, ylim = 0:1)
+legend("topleft", title = "Metaphenotype", legend = meta.col$metaphenotype,
+       pch = 16, pt.cex = 0.5, bty = "n", ncol = 4, cex = 0.4,
+       col = meta.col$color.meta)
+dev.off()
+}
+```

@@ -1,0 +1,1446 @@
+---
+title: "04_lmeModel_ssGSEA_Scores"
+author: "Eric Medina"
+date: "2024-07-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(data.table)
+library(openxlsx)
+library(foreach)
+library(lmerTest)
+library(conflicted)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+library(tidyverse)
+conflict_prefer_all("dplyr", quiet = T)
+
+#CELL LINES
+cellline1 <- "CAMA.1"
+cellline3 <- "T47D"
+cellline2 <- "MCF.7"
+#CONDITIONS
+condition1 <- "DMSO"
+condition2 <- "ever"
+
+#Treatment
+treatments <- "everolimus"
+
+#BATCH
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "counts/"
+dir2 <- "degs/"
+dir3 <- "ssgsea/"
+dir4 <- "metaPhenotypeAnalysis/"
+#FUNCTION TO CONVERT LMER RESULTS INTO A DATA FRAME
+lme2df <- function(x) {
+  x <- enframe(x)
+  x %>%
+    separate(value, into = c("Estimate", "Std.Error", "df", "t_value", 
+                             "P.value"),
+             sep = ",") %>%
+    mutate(Estimate = gsub(pattern = "[:c(Estimate = :]", replacement = "", 
+                           Estimate),
+           Std.Error = gsub(pattern = "[:`Std Error` = :]", replacement = "", 
+                            Std.Error),
+           Std.Error = sub(pattern = "[:.?:]", replacement = "", Std.Error),
+           df = gsub(pattern = "[:df = :]", replacement = "", df),
+           t_value = gsub(pattern = "[:t value` = :]", replacement = "", 
+                          t_value),
+           P.value = gsub(pattern = "[:`Pr(>|t|)` = :]", replacement = "", 
+                          P.value)) %>%
+  mutate_at(c("Estimate", "Std.Error", "df", "t_value", "P.value"), as.numeric) 
+}
+```
+
+```{r}
+set.seed(09052024)
+
+start.all <- Sys.time()
+
+#Read in raw ssGSEA scores
+setwd(dir = paste0(dir, dir3, "rawScores/"))
+gsva.data.all <- fread(file = paste(prefix, cellSamples, "ssGSEA_collections", 
+                                   "H_C2_C5_C6_scores_LongFormat_v7.txt",
+                                  sep = "_"),
+       sep = "\t", header = T, quote = "")
+
+
+#RUN LME MODEL ON HALLMARK
+
+
+#HALLMARK : PRE-treatment comparison : Sensitive and DMSO as references
+collection.msigdb <- "H"
+treatment.time <- "pre.Treatment"
+state.ref <- "sen"
+treatment.ref <- "DMSO"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_s.dmso <- foreach(i = names) %do% {
+  print(i)
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(h.lme.pre <- end-start)
+#Time difference of 5.325666 secs
+
+names(gs_lme_s.dmso) <- names
+
+gs_lme_s.dmso[[1]]
+summary(gs_lme_s.dmso[[1]])
+coef(summary(gs_lme_s.dmso[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_s.dmso <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+    coef(summary(gs_lme_s.dmso[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "stateeverR", "R.vs.S_DMSO",
+                          ifelse(coefficient == "treatmentever", 
+                                 "S.ever.vs.S.DMSO", 
+                                 "S.vs.R.ever_vs_S.vs.R.DMSO"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "stateeverR" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "stateeverR" & Estimate < 0, "sen.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate < 0, "sen.DMSO",
+                           "interaction")))))) %>%
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(h.df.pre <- end-start)
+
+head(coef_s.dmso)
+
+#Isolate each coefficient and calculate FDR
+start <- Sys.time()
+
+coef_s.dmso <- coef_s.dmso %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything())
+
+end <- Sys.time()
+fdr.time.1 <- end-start
+
+
+#Join metaphenotype annotations
+
+#Read in file with annotations
+setwd(dir = paste0(dir, dir4))
+metaphenotype <- fread(file = paste0("hallmark_KEGG_BIOCARTA_REACTOME_gene.sets_",
+                                 "metaphenotype_annotations.txt"),
+                   sep = "\t", header = T, quote = "")
+
+#Join
+coef_s.dmso <- coef_s.dmso %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+head(coef_s.dmso)
+
+#Save as list
+coef_s.dmso_list <- list("Intercept" = coef_s.dmso %>% 
+                                        filter(coefficient == "Intercept"),
+                           "stateeverR" = coef_s.dmso %>% 
+                                        filter(coefficient == "stateeverR"),
+                           "treatmentever" = coef_s.dmso %>% 
+                                        filter(coefficient == "treatmentever"),
+                           "stateeverR_treatmentever" = coef_s.dmso %>% 
+                             filter(coefficient == "stateeverR_treatmentever"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_s.dmso_list, file = paste(prefix, cellSamples,
+                                                    collection.msigdb, 
+                                                    refs, "refs", treatment.time,
+                                                    "lme_results_v7.xlsx",
+                                                    sep = "_"))
+#Txt version
+fwrite(coef_s.dmso, file = paste(prefix, cellSamples, collection.msigdb, 
+                                 refs, "refs", treatment.time, 
+                                 "lme_results_v7.txt", sep = "_"),    
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#}
+
+
+#HALLMARK : POST-treatment comparison : everR and ever as references
+
+treatment.time <- "post.Treatment"
+state.ref <- "everR"
+treatment.ref <- "ever"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_r.ever <- foreach(i = names) %do% {
+  print(i)
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(h.lme.post <- end-start)
+#Time difference of 5.325666 secs
+
+names(gs_lme_r.ever) <- names
+
+gs_lme_r.ever[[1]]
+summary(gs_lme_r.ever[[1]])
+coef(summary(gs_lme_r.ever[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_r.ever <- foreach(i = names, .combine = "rbind") %do% {
+  
+  print(i)
+    coef(summary(gs_lme_r.ever[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "statesen", "S.vs.R_ever",
+                          ifelse(coefficient == "treatmentDMSO", "R.DMSO.vs.R.ever",
+                             "R.vs.S.DMSO_vs_R.vs.S.ever"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "statesen" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "statesen" & Estimate < 0, "everR.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate < 0, "everR.ever",
+                           "interaction")))))) %>% 
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(h.df.post <- end-start)
+
+head(coef_r.ever)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_r.ever <- coef_r.ever %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time.2 <- end-start
+
+head(coef_r.ever)
+
+#Save as list
+coef_r.ever_list <- list("Intercept" = coef_r.ever %>% 
+                             filter(coefficient == "Intercept"),
+                           "statesen" = coef_r.ever %>% 
+                             filter(coefficient == "statesen"),
+                           "treatmentDMSO" = coef_r.ever %>% 
+                           filter(coefficient == "treatmentDMSO"),
+                           "statesen_treatmentDMSO" = coef_r.ever %>% 
+                             filter(coefficient == "statesen_treatmentDMSO"))
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_r.ever_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_r.ever, file = paste(prefix, cellSamples, collection.msigdb, 
+                                 refs, "refs", treatment.time, 
+                                 "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+#RUN LME MODEL ON C2
+
+
+#C2 : PRE-treatment comparison : Sensitive and DMSO as references
+collection.msigdb <- "C2"
+treatment.time <- "pre.Treatment"
+state.ref <- "sen"
+treatment.ref <- "DMSO"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_s.dmso <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c2.lme.pre <- end-start)
+names(gs_lme_s.dmso) <- names
+
+gs_lme_s.dmso[[1]]
+summary(gs_lme_s.dmso[[1]])
+coef(summary(gs_lme_s.dmso[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_s.dmso <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+    coef(summary(gs_lme_s.dmso[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "stateeverR", "R.vs.S_DMSO",
+                          ifelse(coefficient == "treatmentever", 
+                                 "S.ever.vs.S.DMSO", 
+                                 "S.vs.R.ever_vs_S.vs.R.DMSO"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "stateeverR" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "stateeverR" & Estimate < 0, "sen.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate < 0, "sen.DMSO",
+                           "interaction")))))) %>%
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(c2.df.pre <- end-start)
+
+head(coef_s.dmso)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_s.dmso <- coef_s.dmso %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time.3 <- end-start
+
+head(coef_s.dmso)
+
+#Save as list
+coef_s.dmso_list <- list("Intercept" = coef_s.dmso %>% 
+                                        filter(coefficient == "Intercept"),
+                           "stateeverR" = coef_s.dmso %>% 
+                                        filter(coefficient == "stateeverR"),
+                           "treatmentever" = coef_s.dmso %>% 
+                                        filter(coefficient == "treatmentever"),
+                           "stateeverR_treatmentever" = coef_s.dmso %>% 
+                             filter(coefficient == "stateeverR_treatmentever"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_s.dmso_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_s.dmso, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+#C2 : POST-treatment comparison : everR and ever as references
+
+treatment.time <- "post.Treatment"
+state.ref <- "everR"
+treatment.ref <- "ever"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_r.ever <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c2.lme.post <- end-start)
+#Time difference of 3.235302 mins
+
+names(gs_lme_r.ever) <- names
+
+gs_lme_r.ever[[1]]
+summary(gs_lme_r.ever[[1]])
+coef(summary(gs_lme_r.ever[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_r.ever <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)  
+  
+    coef(summary(gs_lme_r.ever[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "statesen", "S.vs.R_ever",
+                          ifelse(coefficient == "treatmentDMSO", "R.DMSO.vs.R.ever",
+                             "R.vs.S.DMSO_vs_R.vs.S.ever"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "statesen" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "statesen" & Estimate < 0, "everR.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate < 0, "everR.ever",
+                           "interaction")))))) %>% 
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor) 
+}
+end <- Sys.time()
+print(c2.df.post <- end-start)
+#Time difference of 10.93179 mins
+
+head(coef_r.ever)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_r.ever <- coef_r.ever %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time.4 <- end-start
+
+head(coef_r.ever)
+
+#Save as list
+coef_r.ever_list <- list("Intercept" = coef_r.ever %>% 
+                             filter(coefficient == "Intercept"),
+                           "statesen" = coef_r.ever %>% 
+                             filter(coefficient == "statesen"),
+                           "treatmentDMSO" = coef_r.ever %>% 
+                           filter(coefficient == "treatmentDMSO"),
+                           "statesen_treatmentDMSO" = coef_r.ever %>% 
+                             filter(coefficient == "statesen_treatmentDMSO"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_r.ever_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_r.ever, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+
+#RUN LME MODEL ON C5
+
+#C5 : PRE-treatment comparison : Sensitive and DMSO as references
+collection.msigdb <- "C5"
+treatment.time <- "pre.Treatment"
+state.ref <- "sen"
+treatment.ref <- "DMSO"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_s.dmso <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c5.lme.pre <- end-start)
+names(gs_lme_s.dmso) <- names
+
+gs_lme_s.dmso[[1]]
+summary(gs_lme_s.dmso[[1]])
+coef(summary(gs_lme_s.dmso[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_s.dmso <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+    coef(summary(gs_lme_s.dmso[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "stateeverR", "R.vs.S_DMSO",
+                          ifelse(coefficient == "treatmentever", 
+                                 "S.ever.vs.S.DMSO", 
+                                 "S.vs.R.ever_vs_S.vs.R.DMSO"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "stateeverR" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "stateeverR" & Estimate < 0, "sen.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate < 0, "sen.DMSO",
+                           "interaction")))))) %>%
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(c5.df.pre <- end-start)
+
+head(coef_s.dmso)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_s.dmso <- coef_s.dmso %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time.5 <- end-start
+
+head(coef_s.dmso)
+
+#Save as list
+coef_s.dmso_list <- list("Intercept" = coef_s.dmso %>% 
+                                        filter(coefficient == "Intercept"),
+                           "stateeverR" = coef_s.dmso %>% 
+                                        filter(coefficient == "stateeverR"),
+                           "treatmentever" = coef_s.dmso %>% 
+                                        filter(coefficient == "treatmentever"),
+                           "stateeverR_treatmentever" = coef_s.dmso %>% 
+                             filter(coefficient == "stateeverR_treatmentever"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_s.dmso_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_s.dmso, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+#C5 : POST-treatment comparison : everR and ever as references
+
+treatment.time <- "post.Treatment"
+state.ref <- "everR"
+treatment.ref <- "ever"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_r.ever <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c5.lme.post <- end-start)
+#Time difference of 3.235302 mins
+
+names(gs_lme_r.ever) <- names
+
+gs_lme_r.ever[[1]]
+summary(gs_lme_r.ever[[1]])
+coef(summary(gs_lme_r.ever[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_r.ever <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)  
+  
+    coef(summary(gs_lme_r.ever[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "statesen", "S.vs.R_ever",
+                          ifelse(coefficient == "treatmentDMSO", "R.DMSO.vs.R.ever",
+                             "R.vs.S.DMSO_vs_R.vs.S.ever"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "statesen" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "statesen" & Estimate < 0, "everR.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate < 0, "everR.ever",
+                           "interaction")))))) %>% 
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor) 
+}
+end <- Sys.time()
+print(c5.df.post <- end-start)
+#Time difference of 10.93179 mins
+
+head(coef_r.ever)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_r.ever <- coef_r.ever %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time6 <- end-start
+
+head(coef_r.ever)
+
+#Save as list
+coef_r.ever_list <- list("Intercept" = coef_r.ever %>% 
+                             filter(coefficient == "Intercept"),
+                           "statesen" = coef_r.ever %>% 
+                             filter(coefficient == "statesen"),
+                           "treatmentDMSO" = coef_r.ever %>% 
+                           filter(coefficient == "treatmentDMSO"),
+                           "statesen_treatmentDMSO" = coef_r.ever %>% 
+                             filter(coefficient == "statesen_treatmentDMSO"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_r.ever_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_r.ever, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+
+#RUN LME MODEL ON C6
+
+#C6 : PRE-treatment comparison : Sensitive and DMSO as references
+collection.msigdb <- "C6"
+treatment.time <- "pre.Treatment"
+state.ref <- "sen"
+treatment.ref <- "DMSO"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_s.dmso <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c6.lme.pre <- end-start)
+names(gs_lme_s.dmso) <- names
+
+gs_lme_s.dmso[[1]]
+summary(gs_lme_s.dmso[[1]])
+coef(summary(gs_lme_s.dmso[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_s.dmso <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+    coef(summary(gs_lme_s.dmso[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "stateeverR", "R.vs.S_DMSO",
+                          ifelse(coefficient == "treatmentever", 
+                                 "S.ever.vs.S.DMSO", 
+                                 "S.vs.R.ever_vs_S.vs.R.DMSO"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "stateeverR" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "stateeverR" & Estimate < 0, "sen.DMSO",
+                    ifelse(coefficient == "treatmentever" & Estimate < 0, "sen.DMSO",
+                           "interaction")))))) %>%
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor)
+}
+end <- Sys.time()
+print(c6.df.pre <- end-start)
+
+head(coef_s.dmso)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_s.dmso <- coef_s.dmso %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time7 <- end-start
+
+head(coef_s.dmso)
+
+#Save as list
+coef_s.dmso_list <- list("Intercept" = coef_s.dmso %>% 
+                                        filter(coefficient == "Intercept"),
+                           "stateeverR" = coef_s.dmso %>% 
+                                        filter(coefficient == "stateeverR"),
+                           "treatmentever" = coef_s.dmso %>% 
+                                        filter(coefficient == "treatmentever"),
+                           "stateeverR_treatmentever" = coef_s.dmso %>% 
+                             filter(coefficient == "stateeverR_treatmentever"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_s.dmso_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_s.dmso, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+#C6 : POST-treatment comparison : everR and ever as references
+
+treatment.time <- "post.Treatment"
+state.ref <- "everR"
+treatment.ref <- "ever"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- gsva.data.all %>% 
+  filter(collection == collection.msigdb) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$state <- relevel(as.factor(gsva.data$state), ref = state.ref)
+gsva.data$treatment <- relevel(as.factor(gsva.data$treatment), ref = treatment.ref) 
+
+str(gsva.data)
+levels(gsva.data$state)
+levels(gsva.data$treatment)
+rows <- nrow(gsva.data)
+
+
+# Run LINEAR MIXED EFFECTS MODEL ON PATHWAYS
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+start <- Sys.time()
+
+gs_lme_r.ever <- foreach(i = names) %do% {
+  print(i)
+
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  print(i)
+  lmerTest::lmer(formula = scale(Enrichment_Score) ~ state * treatment + (1|cellLine),
+                          data = gsva.2.3)
+}
+end <- Sys.time()
+print(c6.lme.post <- end-start)
+#Time difference of 3.235302 mins
+
+names(gs_lme_r.ever) <- names
+
+gs_lme_r.ever[[1]]
+summary(gs_lme_r.ever[[1]])
+coef(summary(gs_lme_r.ever[[1]]))
+
+
+#Extract model coefficients for all pathways
+start <- Sys.time()
+
+coef_r.ever <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)  
+  
+    coef(summary(gs_lme_r.ever[[i]])) %>% 
+      as.data.frame() %>% 
+      rownames_to_column(var = "coefficient") %>% 
+      rename("std.error" = "Std. Error",
+             "t.value" = "t value",
+             "p.value" = "Pr(>|t|)") %>% 
+      add_column(Gene_Set = i) %>% 
+      mutate(coefficient = gsub("[(*]", "", coefficient),
+             coefficient = gsub("[)*]", "", coefficient),
+             coefficient = gsub("[:*]", "_", coefficient),
+             comparison = ifelse(coefficient == "Intercept", "cellLine",
+                          ifelse(coefficient == "statesen", "S.vs.R_ever",
+                          ifelse(coefficient == "treatmentDMSO", "R.DMSO.vs.R.ever",
+                             "R.vs.S.DMSO_vs_R.vs.S.ever"))),
+             enriched = ifelse(coefficient == "Intercept", "intercept",
+                    ifelse(coefficient == "statesen" & Estimate > 0, "sen.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate > 0, "everR.DMSO",
+                    ifelse(coefficient == "statesen" & Estimate < 0, "everR.ever",
+                    ifelse(coefficient == "treatmentDMSO" & Estimate < 0, "everR.ever",
+                           "interaction")))))) %>% 
+      separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "[_]", 
+               extra = "merge", remove = F) %>%
+      mutate_at(vars(Estimate, std.error, df, t.value, p.value), as.numeric) %>% 
+      mutate_at(vars(Gene_Set, path.info_1, comparison, enriched), as.factor) 
+}
+end <- Sys.time()
+print(c6.df.post <- end-start)
+#Time difference of 10.93179 mins
+
+head(coef_r.ever)
+
+#Isolate each coefficient and calculate FDR
+#Join metaphenotype annotations
+start <- Sys.time()
+
+coef_r.ever <- coef_r.ever %>% 
+  group_by(coefficient) %>% 
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  dplyr::select(Gene_Set, path.info_1, path.info_2, Estimate, std.error, df, 
+                t.value, FDR, p.value, coefficient, comparison, enriched, 
+                everything()) %>% 
+  left_join(metaphenotype, by = "Gene_Set")
+
+end <- Sys.time()
+fdr.time8 <- end-start
+
+head(coef_r.ever)
+
+#Save as list
+coef_r.ever_list <- list("Intercept" = coef_r.ever %>% 
+                             filter(coefficient == "Intercept"),
+                           "statesen" = coef_r.ever %>% 
+                             filter(coefficient == "statesen"),
+                           "treatmentDMSO" = coef_r.ever %>% 
+                           filter(coefficient == "treatmentDMSO"),
+                           "statesen_treatmentDMSO" = coef_r.ever %>% 
+                             filter(coefficient == "statesen_treatmentDMSO"))
+
+#.f = function() {
+#Save
+setwd(dir = paste0(dir, dir3, "lmeModelResults/", collection.msigdb, "/", 
+                   treatment.time))
+#Excel version
+openxlsx::write.xlsx(coef_r.ever_list, file = paste(prefix, cellSamples,
+                                                   collection.msigdb, 
+                                                   refs, "refs", treatment.time,
+                                                   "lme_results_v7.xlsx",
+                                                   sep = "_"))
+#Txt version
+fwrite(coef_r.ever, file = paste(prefix, cellSamples, collection.msigdb, 
+                                     refs, "refs", treatment.time, 
+                                     "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+#}
+
+
+
+print("MERGE HALLMARK AND C2 (KEGG, BIOCARTA, REACTOME)")
+
+#stateeverR
+
+print("Read in lme results")
+
+#Read in Hallmark
+setwd(dir = paste0(dir, dir3, "lmeModelResults/H/pre.Treatment"))
+#list.files()
+
+tmp1 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_",
+                               "everSamples_H_sen.DMSO_refs_",
+                               #"pre.Treatment_lme_results.xlsx"),
+                               "pre.Treatment_lme_results_v7.xlsx"),
+                           sheet = "stateeverR")
+
+tmp1 <- tmp1 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F)
+
+#Read in C2, filter for KEGG, BIOCARTA, REACTOME
+setwd(dir = paste0(dir, dir3, "lmeModelResults/C2/pre.Treatment"))
+tmp2 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_C2_sen.DMSO_refs_", 
+                                             "pre.Treatment_lme_results_v7.xlsx"),
+                           sheet = "stateeverR")
+tmp2 <- tmp2 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F) %>% 
+  filter(path.info_1 %in% c("KEGG", "BIOCARTA", "REACTOME"))
+
+merge1 <- tmp1 %>% 
+  full_join(tmp2)
+
+
+#statesen
+
+#Read in hallmark
+setwd(dir = paste0(dir, dir3, "lmeModelResults/H/post.Treatment"))
+tmp1 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                              "everSamples_H_everR.ever_refs_", 
+                                              #"post.Treatment_lme_results.xlsx"),
+                                              "post.Treatment_lme_results_v7.xlsx"),
+                           sheet = "statesen")
+
+tmp1 <- tmp1 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F)
+
+#Read in C2
+setwd(dir = paste0(dir, dir3, "lmeModelResults/C2/post.Treatment"))
+tmp2 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_C2_everR.ever_refs_", 
+                                             "post.Treatment_lme_results_v7.xlsx"),
+                           sheet = "statesen")
+
+tmp2 <- tmp2 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F) %>%
+  filter(path.info_1 %in% c("KEGG", "BIOCARTA", "REACTOME"))
+
+merge2 <- tmp1 %>% 
+  full_join(tmp2)
+
+
+#treatmentever
+
+#Read in hallmark
+setwd(dir = paste0(dir, dir3, "lmeModelResults/H/pre.Treatment"))
+tmp1 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_H_sen.DMSO_refs_", 
+                                             #"pre.Treatment_lme_results.xlsx"),
+                                             "pre.Treatment_lme_results_v7.xlsx"),
+                           sheet = "treatmentever")
+
+tmp1 <- tmp1 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F)
+
+#Read in C2
+setwd(dir = paste0(dir, dir3, "lmeModelResults/C2/pre.Treatment"))
+tmp2 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_C2_sen.DMSO_refs_", 
+                                             "pre.Treatment_lme_results_v7.xlsx"),
+                           sheet = "treatmentever")
+tmp2 <- tmp2 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F) %>%
+  filter(path.info_1 %in% c("KEGG", "BIOCARTA", "REACTOME"))
+
+merge3 <- tmp1 %>% 
+  full_join(tmp2)
+
+
+#treatmentDMSO
+
+#Read in hallmark
+setwd(dir = paste0(dir, dir3, "lmeModelResults/H/post.Treatment"))
+tmp1 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_H_everR.ever_refs_", 
+                                             #"post.Treatment_lme_results.xlsx"),
+                                             "post.Treatment_lme_results_v7.xlsx"),
+                           sheet = "treatmentDMSO")
+
+tmp1 <- tmp1 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F)
+
+#Read in C2
+setwd(dir = paste0(dir, dir3, "lmeModelResults/C2/post.Treatment"))
+tmp2 <- openxlsx::read.xlsx(xlsxFile = paste0("COH069_15929R_RNA_", 
+                                             "everSamples_C2_everR.ever_refs_", 
+                                             "post.Treatment_lme_results_v7.xlsx"),
+                           sheet = "treatmentDMSO")
+
+tmp2 <- tmp2 %>% 
+  separate(Gene_Set, into = c("path.info_1", "path.info_2"), sep = "_", 
+           extra = "merge", remove = F) %>% 
+  filter(path.info_1 %in% c("KEGG", "BIOCARTA", "REACTOME"))
+
+merge4 <- tmp1 %>% 
+  full_join(tmp2)
+
+
+print("Save as list")
+
+sig.list <- list("stateeverR" = merge1,
+                 "statesen" = merge2,
+                 "treatmentever" = merge3,
+                 "treatmentDMSO" = merge4
+                 )
+
+merge.all <- merge1 %>% 
+  full_join(merge2) %>% 
+  full_join(merge3) %>% 
+  full_join(merge4) %>% 
+  rename(Std.Error = std.error)
+
+#.f = function() {
+setwd(dir = paste0(dir, dir3, "lmeModelResults/"))
+
+#Save as xlsx file
+openxlsx::write.xlsx(sig.list, file = paste(prefix, cellSamples, "H.C2_pathways", 
+                                            "lme_results_v7.xlsx", sep = "_"))
+
+#Save as txt file
+fwrite(merge.all, file = paste(prefix, cellSamples, "H.C2_pathways", 
+                               "lme_results_v7.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Read in 
+merge.all <- fread(file = paste(prefix, cellSamples, "H.C2_pathways", 
+                               "lme_results_v7.txt", sep = "_"),
+       sep = "\t", header = T, quote = "")
+
+#}
+
+
+
+#Make figureS1 panel B
+
+#Get mTOR related genesets (picked these out)
+keep <- c("HALLMARK_MTORC1_SIGNALING", "HALLMARK_PI3K_AKT_MTOR_SIGNALING")
+
+merge.all1 <- merge.all %>% 
+  filter(Gene_Set %in% keep) %>% 
+  droplevels()
+
+
+b.data <- gsva.data.all %>% 
+  filter(Gene_Set %in% keep) %>% 
+  mutate(S_T = ordered(S_T, levels = c("sen_DMSO", "sen_ever",
+                                       "everR_DMSO", "everR_ever"))) %>% 
+  mutate_at(vars(Gene_Set, cellLine, cellLine2, C_S_T), factor)
+str(b.data)
+
+
+tmp <- merge.all1 %>% 
+  select(Gene_Set, comparison, FDR, p.value) %>% 
+  mutate(FDR = format.pval(FDR, digits = 3)) %>% 
+  mutate(p.value = format.pval(p.value, digits = 3)) %>% 
+  mutate_at(vars(FDR, p.value), as.numeric) %>% 
+  arrange(Gene_Set, comparison)
+tmp
+
+stat.test <- foreach (i = keep, .combine = "rbind") %do% { 
+  
+  print(i)
+  
+  tmp1 <- tmp %>% 
+    filter(Gene_Set == i)
+  
+  b.data %>%
+  filter(Gene_Set == i) %>% 
+  group_by(Gene_Set) %>% 
+  t_test(Enrichment_Score ~ S_T) %>%
+  add_xy_position(x = "S_T", scales = "free", step.increase = 0.2) %>% 
+  filter(!groups %in% list(c("sen_ever", "everR_DMSO"), 
+                           c("sen_DMSO", "everR_ever"))) %>% 
+  filter(!groups %in% list(c("everR_DMSO", "sen_ever"), 
+                           c("everR_ever", "sen_DMSO"))) %>% 
+  mutate(comparison = ifelse(group1 == "everR_DMSO" & group2 == "everR_ever",
+                             "R.DMSO.vs.R.ever",
+                      ifelse(group1 == "everR_DMSO" & group2 == "sen_DMSO",
+                             "R.vs.S_DMSO",
+                      ifelse(group1 == "everR_ever" & group2 == "sen_ever" ,
+                             "S.vs.R_ever",
+                      ifelse(group1 == "sen_DMSO" & group2 == "sen_ever",
+                             "S.ever.vs.S.DMSO", 
+                      ifelse(group1 == "sen_DMSO" & group2 == "everR_DMSO",
+                             "R.vs.S_DMSO",
+                      ifelse(group1 == "sen_ever" & group2 == "everR_ever" ,
+                             "S.vs.R_ever", "error"))))))) %>% 
+  arrange(Gene_Set, comparison) %>% 
+  ungroup() %>% 
+  group_by(Gene_Set, comparison) %>% 
+  left_join(tmp1, by = join_by(Gene_Set, comparison)) %>% 
+  ungroup() %>% 
+  add_significance(p.col = "FDR")
+    
+}
+
+stat.test <- stat.test %>% 
+  mutate(Gene_Set = factor(Gene_Set, levels= c("HALLMARK_MTORC1_SIGNALING",
+                                      "HALLMARK_PI3K_AKT_MTOR_SIGNALING")))
+
+p <- b.data %>% 
+  mutate(Gene_Set = factor(Gene_Set, levels= c("HALLMARK_MTORC1_SIGNALING",
+                                  "HALLMARK_PI3K_AKT_MTOR_SIGNALING"))) %>% 
+  ggplot(mapping = aes(x = S_T, y = Enrichment_Score)) +
+  geom_boxplot(mapping = aes(fill = S_T),
+               show.legend = F, alpha = 0.7, width = 0.4) +
+  geom_point(mapping = aes(shape = cellLine), size = 3,
+             position = position_jitter(width = 0.05), show.legend = T) +
+  scale_fill_manual(values = c("dodgerblue","cyan3", "deeppink4", "hotpink")) +
+  facet_wrap(~Gene_Set, scales = "free", ncol = 3) +
+  theme(axis.text.x = element_text(size = 12, face = "bold", angle = 20,
+                                   vjust = 0.5, hjust = 0.5),
+        axis.text.y = element_text(size = 11, face = "bold"),
+        axis.title.y.left = element_text(size = 12, face = "bold"),
+        axis.line = element_line(linewidth = 1),
+        axis.title.x = element_blank()) +
+  theme(strip.text = element_text(size = 10, face = "bold"),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        legend.title = element_text(size = 11, face = "bold"),
+        legend.text = element_text(size = 10, face = "bold"),
+        plot.margin = margin(t = 0, r = 0, b = 0, l = 0, unit = "in")) +
+  ylab(label = "ssGSEA Score") +
+  guides(#fill = guide_legend(title = "State_Treatment", face = "bold", size = 9),
+         shape = guide_legend(title = "Cell Line", override.aes = list(size=3))) +
+  stat_pvalue_manual(stat.test, 
+                     #label = "FDR = {FDR}", 
+                     label = "p = {p.value}", 
+                     size = 4,
+                     tip.length = 0.01, bracket.size = .2, step.increase = 0,
+                     hide.ns = F) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+p
+
+#.f = function() {
+
+ggsave(filename = paste0(prefix, "_", cellSamples, "_hallmark.",
+                         "mTORGeneSets_EnrichmentScores_ggplot_v7.tiff"), 
+         device = "tiff", path = paste0(dir, "mTOR_paper/figures_for_paper/",
+                                        "updatedFigures_v2/"), 
+          units = "in", width = 10, height = 6, dpi = 300, create.dir = T)
+
+#}
+
+end.all <- Sys.time()
+print(all.script <- end.all - start.all)
+#Time difference of 44.66714 mins
+
+```
+

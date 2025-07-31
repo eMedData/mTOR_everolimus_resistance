@@ -1,0 +1,495 @@
+---
+title: "save ccle and ctrp2 files for predictive model"
+author: "Eric Medina"
+date: "2024-05-21"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#LOAD LIBRARIES
+library(annotables)
+library(impute)
+library(plyr)
+library(ggplot2)
+library(ggforce)
+library(ggpubr)
+library(data.table)
+library(foreach)
+library(doParallel)
+library(parallel)
+library(GO.db)
+library(org.Hs.eg.db)
+library(org.Sc.sgd.db)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(kableExtra)
+library(GSEABase)
+library(GSVA)
+library(conflicted)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+cellSamples1 <- "ccle_v2_2015_data"
+cellSamples2 <- "ctrp_v2_2015_data"
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "pharmacogenomicsDataSets/ccle_data/"
+dir2 <- "ccle_ctrp_v2_2015_data/"
+dir3 <- "viper/"
+```
+
+```{r}
+set.seed(05202025)
+
+
+#Read in AUC  data for KNN imputation
+
+setwd(paste0(dir, dir1, dir2))
+#list.files()
+auc.data <- fread(file = paste0("v20.data.curves_post_qc.txt"),
+                        sep = "\t", header = T, quote = "")
+head(auc.data)
+
+
+#Read in experiment info
+expr.meta <- fread(file = paste0("v20.meta.per_experiment.txt"),
+                        sep = "\t", header = T, quote = "")
+expr.meta <- expr.meta %>% 
+  select(experiment_id, master_ccl_id) %>% 
+  unique()
+
+head(expr.meta)
+
+#Get auc info
+auc.data.tmp <- auc.data %>% 
+  select(experiment_id, area_under_curve, master_cpd_id) %>% 
+  left_join(expr.meta, by = "experiment_id")
+head(auc.data.tmp)
+
+#how many cell lines
+auc.data.tmp %>% 
+  pull(master_ccl_id) %>% 
+  unique() %>% 
+  length()
+#887
+
+#How many drugs
+auc.data.tmp %>% 
+  pull(master_cpd_id) %>% 
+  unique() %>% 
+  length()
+#545
+
+
+#Read in cell line info
+
+setwd(paste0(dir, dir1, dir2))
+#list.files()
+cellLine.meta <- fread(file = paste0("v20.meta.per_cell_line.txt"),
+                        sep = "\t", header = T, quote = "")
+head(cellLine.meta)
+
+#how many cell lines
+cellLine.meta %>% 
+  pull(master_ccl_id) %>% 
+  unique() %>% 
+  length()
+
+#Check if all cell line ids have cell line names in cell line meta data
+all(auc.data.tmp$master_ccl_id %in% cellLine.meta$master_ccl_id)
+
+#How many cell lines with experiment IDs map to cell line names in auc data
+cellLine.meta1 <- cellLine.meta %>% 
+  filter(master_ccl_id %in% auc.data.tmp$master_ccl_id)
+#887
+
+
+#Read in drug info
+drug.info <- fread(file = paste0("v20.meta.per_compound.txt"),
+                        sep = "\t", header = T, quote = "")
+head(drug.info)
+
+all(drug.info$master_cpd_id %in% auc.data.tmp$master_cpd_id)
+
+
+#Make data frame with cell line and drug names
+auc.data1 <- auc.data.tmp %>% 
+  #filter(experiment_id %in% cellLine.meta1$master_ccl_id) %>% 
+  left_join(cellLine.meta1, by = "master_ccl_id") %>% 
+  left_join(drug.info, by = "master_cpd_id") %>% 
+  select(experiment_id, area_under_curve, master_ccl_id, ccl_name, ccle_primary_site, ccle_primary_hist,
+         ccle_hist_subtype_1, master_cpd_id, broad_cpd_id, cpd_name, 
+         top_test_conc_umol, gene_symbol_of_protein_target, 
+         target_or_activity_of_compound) %>% 
+  mutate(cpd_name = str_replace_all(cpd_name, pattern = " ", replacement = "_")) %>% 
+  rename("CellLine" = "ccl_name",
+         "DRUG_NAME" = "cpd_name",
+         "AUC" = "area_under_curve",
+         "Drug.target" = "gene_symbol_of_protein_target") %>% 
+  unique()
+
+head(auc.data1)
+
+
+
+#Get cell lines with duplicate drug treatments of same drug and take the mean
+tmp.c <- auc.data1 %>% 
+  summarise(f = n(), .by = c(CellLine, DRUG_NAME)) %>% 
+  arrange(desc(f)) %>% 
+  filter(f >= 2)
+head(tmp.c)
+
+table(tmp.c$CellLine)
+
+tmp2 <- auc.data
+
+#Get cellLines with mulitple AUC for same drug
+takemean <- tmp.c %>% 
+  pull(CellLine) %>% 
+  unique()
+
+#Get cellLines with mulitple AUC for same drug
+takemeandrug <- tmp.c %>% 
+  pull(DRUG_NAME) %>% 
+  unique()
+
+#put drug/cellLine pairs with only one AUC value here
+tmp2 <- auc.data1 %>% 
+  filter(!CellLine %in% takemean)
+
+#put drug/cellLine pairs with mulitple AUC value here
+tmp3 <- auc.data1 %>% 
+  filter(CellLine %in% takemean)
+
+head(tmp3)
+
+
+mean.list <- list()
+#i <- takemean[1]
+#j <- takemeandrug[2]
+for (i in takemean) {
+  for(j in takemeandrug) {
+    
+  print(i)
+  print(j)
+  
+  tmp <- tmp3 %>% 
+    filter(CellLine == i,
+           DRUG_NAME == j) %>% 
+    pull(AUC) %>% 
+    mean()
+  
+  mean.list[[j]] <- data.frame(CellLine = i,
+                     DRUG_NAME = j,
+                     AUC = tmp)
+  }
+    
+}
+
+
+
+tmp3.1 <- ldply(mean.list, .id = NULL) %>% 
+  filter(!AUC == "NaN")
+
+head(tmp3.1)
+head(tmp2)
+
+auc.data2 <- tmp2 %>% 
+  select(AUC, CellLine, DRUG_NAME) %>% 
+  full_join(tmp3.1, by = colnames(.)) %>% 
+  pivot_wider(names_from = "CellLine", values_from = "AUC") 
+
+dim(auc.data2)
+head(auc.data2)[,1:5]
+
+
+drug.info2 <- auc.data1 %>% 
+  select(DRUG_NAME, master_cpd_id, broad_cpd_id, top_test_conc_umol, 
+         Drug.target, target_or_activity_of_compound) %>% 
+  unique() 
+head(drug.info2)
+
+dim(auc.data2)
+head(auc.data2)[,1:5]
+
+#How many na's in data set
+sum(is.na(auc.data2))
+
+
+#KNN IMPUATION WITH DRUGS AS COLNAMES AND CELL LINES AS ROWNAMES
+  
+#column with over 80% missing values
+
+tmp <- auc.data2[which(rowMeans(is.na(auc.data2)) > 0.80), ] %>% 
+  pull(DRUG_NAME) %>% 
+  as.character()
+
+auc.data3 <- auc.data2 %>% 
+  filter(!DRUG_NAME %in% tmp) %>% 
+  column_to_rownames(var = "DRUG_NAME") %>% 
+  as.matrix()
+dim(auc.data3)
+head(auc.data3)[,1:5]
+  
+#Perform knn imputation
+auc.knn <- impute.knn(t(auc.data3))
+
+#Pull out imputation data from list object created by knn imputation
+auc.knn1 <- auc.knn$data
+
+
+auc.knn1 <- auc.knn1 %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "CellLine")
+dim(auc.knn1)
+head(auc.knn1)[,1:5]
+
+
+knn.auc.data <- auc.knn1 %>% 
+  as.data.frame() %>% 
+  arrange(CellLine) %>% 
+  as.data.frame()
+dim(knn.auc.data)
+head(knn.auc.data)[,1:5]
+
+
+
+#GET MR REGULON SIGNATUREs (IDENTIFIED WITH EVEROLIMUS SAMPLES) TO CALCULATE 
+##  ssGSEA SCORES
+
+#Pre-treatment
+setwd(dir = paste0(dir = dir, dir3, "preTx2"))
+#list.files()
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers_",
+                            "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  unique() %>% 
+  as.list()
+preT
+
+#Post-treatment signature
+setwd(dir = paste0(dir = dir, dir3, "postTx2"))
+#list.files()
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_AllRegulonMembers_",
+                             "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  unique() %>% 
+  as.list()
+postT
+
+
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- preT %>% 
+  names()
+
+preTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- preT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  preTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+preTx
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- postT %>% 
+  names()
+
+postTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- postT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  postTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+postTx
+
+#Put  regulons into list for pre and post treatment for enrichment analysis
+pathways_mr <- list(c(preTx, postTx))
+
+names(pathways_mr) <- "SMARCD3"
+
+collection <- names(pathways_mr)
+
+
+
+#Read in normalized and tidy'd CCLE RNA seq expression data
+setwd(dir = paste0(dir, dir1, 
+                   "ccle_ctrp_v2_2015_data/counts/filtered/"))
+counts.df <- fread(file = paste0(cellSamples1, 
+                                 "_filtered_13432_geneExpression_LongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+
+dim(counts.df)
+head(counts.df)[,1:5]
+
+#Select log2CPM values
+tmp.name <- counts.df %>% 
+  select(CellLine) %>% 
+  unique() %>% 
+  separate(CellLine, into = c("CellLine1", "tissue"), 
+           remove = F, sep = "_", extra = "merge")
+head(tmp.name)
+
+#Match cell lines in counts to auc imputated dataframe
+counts1 <- counts.df %>% 
+  left_join(tmp.name, by = "CellLine") %>% 
+  select(Gene_Symbol, CellLine1, log2CPM) %>% 
+  filter(CellLine1 %in% knn.auc.data$CellLine) %>% 
+  arrange(CellLine1) %>% 
+  pivot_wider(names_from =  "CellLine1", values_from = "log2CPM") %>% 
+  column_to_rownames(var = "Gene_Symbol") %>% 
+  as.matrix()
+
+dim(counts1)
+head(counts1)[,1:5]
+
+#Match cell lines with auc data to rnaseq data
+knn.auc.data1 <- knn.auc.data %>% 
+  filter(CellLine %in% colnames(counts1)) %>% 
+  arrange(CellLine) %>% 
+  as.data.frame()
+
+
+#Confirm cell lines in counts are in auc data
+all(colnames(counts1) == knn.auc.data1$CellLine)
+all(knn.auc.data1$CellLine == colnames(counts1))
+
+#save counts with cell lines as first column and genes as column names
+counts2 <- counts1 %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "CellLines")
+
+dim(counts2)
+head(counts2)[,1:5]
+
+#Run ssGSEA's emperical cumulative distribution function to calculate scores
+#i <- collection[1]
+system.time(
+
+gsva_mr <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  pathways <- pathways_mr[[i]]
+  
+  param <- ssgseaParam(exprData = counts1, geneSets = pathways,
+                       minSize = 15, maxSize = 500, alpha = 0.25,
+                       normalize = T)
+  #Run ssgsea
+  gsva(param = param, verbose=TRUE)
+}
+)
+#Elapsed time = 20.794
+
+#Insert column names
+names(gsva_mr) <- collection
+
+#Look at first 5 variables in regulons element in list
+gsva_mr[,1:5]
+
+gsva.tmp1 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set") %>% 
+  filter(Gene_Set == "SMARCD3_preTxRegulonSignature")
+
+gsva.tmp2 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set")%>% 
+  filter(Gene_Set == "SMARCD3_postTxRegulonSignature")
+
+
+
+#Save files
+
+#.f = function() {
+
+if (
+  all(counts2$CellLines == knn.auc.data1$CellLine) &
+  all(counts2$CellLines == gsva.tmp1$CellLine) &
+  all(counts2$CellLines == gsva.tmp2$CellLine)) {
+  print("all cell line names match")
+  print("saving all files")
+  setwd(paste0(dir, dir1, dir2, "predictiveModelFrameWork_files"))
+  
+  print("saving gene expression")
+  fwrite(counts2, file = paste0(cellSamples1, "_", nrow(counts2), ".CellLines_", 
+                                (ncol(counts2)-1), ".Genes_RMA.Normalized_GeneExpression.txt"),
+         sep = "\t", row.names = F, col.names = T, quote = F)
+  
+  print("saving auc imputation data")
+  fwrite(knn.auc.data1, file = paste0(cellSamples2, "_", nrow(knn.auc.data1), 
+                                      ".CellLines_",(ncol(knn.auc.data1)-1), 
+                                      ".Drugs_AUC_knnImputation.txt"),
+         sep = "\t", row.names = F, col.names = T, quote = F)
+  
+  print("Saving ssGSEA scores for PreTx signatures")
+  fwrite(gsva.tmp1, file = paste0(cellSamples1, "_",  
+                                  (ncol(gsva.tmp1)-1), ".CellLines_", 
+                                  nrow(gsva.tmp1), ".PreTx.", cellSamples, 
+                                  ".SMARCD3.Signatures_",
+                                  "ssGSEA.Scores.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+  
+  print("Saving ssGSEA scores for PostTx Signaures")
+  fwrite(gsva.tmp2, file = paste0(cellSamples1, "_",  
+                                  (ncol(gsva.tmp1)-1), ".CellLines_", 
+                                  nrow(gsva.tmp1), ".PostTx.", cellSamples, 
+                                  ".SMARCD3.Signatures_",
+                                  "ssGSEA.Scores.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+  
+  print("Saving tissue annotations")
+  tmp.name1 <- tmp.name %>% 
+    filter(CellLine1 %in% knn.auc.data1$CellLine)
+  
+  fwrite(tmp.name1, file = paste0(cellSamples1, "_", cellSamples2, "_", 
+                                  nrow(tmp.name1), ".CellLines_tissueType.txt"),
+         sep ="\t", row.names = F, col.names = T, quote = F)
+  
+  print("Saving drug annotations")
+  tmp.name1 <- drug.info2 %>% 
+    filter(DRUG_NAME %in% colnames(knn.auc.data1)[2:ncol(knn.auc.data1)])
+  
+  fwrite(tmp.name1, file = paste0(cellSamples1, "_", cellSamples2, "_",
+                                  nrow(tmp.name1), "_CancerDrugInfo.txt"),
+         sep ="\t", row.names = F, col.names = T, quote = F)
+
+}
+
+
+#} #End skip
+```

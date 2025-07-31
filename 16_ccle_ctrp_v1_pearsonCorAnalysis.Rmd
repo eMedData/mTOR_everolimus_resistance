@@ -1,0 +1,945 @@
+---
+title: "ctrpv1 ccle pearson correlations"
+output: html_document
+date: "2025-05-23"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#LOAD LIBRARIES
+library(plyr)
+library(ggrepel)
+library(ggpubr)
+library(ggplot2)
+library(cowplot)
+library(data.table)
+library(foreach)
+library(kableExtra)
+library(conflicted)
+library(scales)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+cellSamples1 <- "ccle_v2_2015_data"
+cellSamples2 <- "ctrp_v1_2013_data"
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "pharmacogenomicsDataSets/ccle_data/"
+dir2 <- "ccle_ctrp_v1_2013_data/"
+```
+
+```{r}
+#Plot ssGSEA scores (MR regulon Signatures) against AUC
+
+#Set seed
+set.seed(05222025)
+
+#Read in normalized and tidy'd gdsc expression data
+setwd(paste0(dir, dir1, dir2, "/predictiveModelFrameWork_files/"))
+#list.files()
+expr <- fread(file = paste0(cellSamples2, "_222.CellLines_13432.Genes_",
+                            "RMA.Normalized_GeneExpression.txt"),
+       sep = "\t", header = T, quote = "")
+
+#expr <- fread(file = paste0(cellSamples2, "_821.CellLines_18762.Genes_",
+#                            "RMA.Normalized_GeneExpression.txt"),
+#       sep = "\t", header = T, quote = "")
+
+head(expr)[,1:5]
+dim(expr)
+
+expr <- expr %>% 
+  as.data.frame() %>% 
+  column_to_rownames(var = "CellLines") %>% 
+  t()
+head(expr)[,1:5]
+
+
+#Read in ssGSEA scores for preTX MR regulon Signatures
+gsva.H <- fread(file = paste0(cellSamples1, "_222.CellLines_1.PreTx.everSamples",
+                              ".SMARCD3.Signatures_ssGSEA.Scores.txt"),  
+                              #".SMARCD3.Signatures_ssGSEA.Scores.txt"),
+       sep = "\t", header = T, quote = "")
+
+gsva.H[,1:5]
+
+
+#Transform into long format
+gsva.data.all <- gsva.H %>% 
+    as.data.frame() %>% 
+    pivot_longer(!Gene_Set, names_to = "CellLine", 
+               values_to = "ssGSEA_Score") %>%
+    separate(Gene_Set, into = c("Regulator", "Tx_timePoint"), sep = "_", 
+             remove = F, extra = "merge") %>% 
+    select(Gene_Set, ssGSEA_Score, CellLine, Regulator, Tx_timePoint) %>% 
+    mutate_at(vars(Gene_Set, CellLine, Regulator, Tx_timePoint), factor) %>% 
+    mutate_at(vars(ssGSEA_Score), as.numeric)  
+
+head(gsva.data.all)
+dim(gsva.data.all)
+
+
+#Read in auc (knn imputation) data from GDSC1
+auc.knn <- fread(file = paste0(cellSamples1, 
+                               "_222.CellLines_338.Drugs_AUC_knnImputation.txt"),
+                 sep = "\t", header = T, quote = "")
+
+
+dim(auc.knn)
+head(auc.knn)[,1:5]
+
+
+auc.knn <- auc.knn %>% 
+  as.data.frame() %>%
+  column_to_rownames(var = "CellLine") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "DRUG_NAME") %>% 
+  mutate(DRUG_NAME = str_replace_all(DRUG_NAME, pattern = " ", replacement = "_"))
+  
+head(auc.knn)[,1:5]
+dim(auc.knn)
+
+any(gsva.data.all$CellLine %in% colnames(auc.knn)[2:ncol(auc.knn)])
+
+#MERGE CELL LINE AND DRUG INFO TO AUC/ssGSEA DATA FRAME
+
+#Transform into longFormat
+knn.data1 <- auc.knn %>% 
+  as.data.frame() %>% 
+  pivot_longer(!DRUG_NAME, names_to = "CellLine", values_to = "AUC") %>% 
+  unique()
+
+head(knn.data1)
+dim(knn.data1)
+length(unique(knn.data1$CellLine))
+length(unique(knn.data1$DRUG_NAME))
+
+clines <- unique(knn.data1$CellLine)
+drugs <- unique(knn.data1$DRUG_NAME)
+
+
+#Read in drug info
+setwd(paste0(dir, dir1, dir2))
+druglist <- fread(file = paste0("v10.M1.informer_set.txt"),
+                  sep = "\t", header = T, quote = F)
+
+druglist1 <- druglist %>% 
+  rename("DRUG_NAME" = "cpd_name",
+         "DrugTarget" = "gene_symbol_of_protein_target",
+         "DrugActivity" = "target_or_activity_of_compound") %>% 
+  mutate(DRUG_NAME = str_replace_all(DRUG_NAME, 
+                                     pattern = " ", replacement = "_")) %>% 
+  filter(DRUG_NAME %in% unique(knn.data1$DRUG_NAME)) %>% 
+  select(DRUG_NAME, DrugTarget, DrugActivity)
+
+
+#Read in cell line info
+setwd(paste0(dir, dir1, dir2, "/predictiveModelFrameWork_files/"))
+cl.tissue <- fread(file = paste0(cellSamples1, "_", cellSamples2, 
+                                 "_222.CellLines_tissueType.txt"),
+                  sep = "\t", header = T, quote = F)
+
+cl.tissue <- cl.tissue %>% 
+  rename("CellLine_orig" = "CellLine",
+         "CellLine" = "CellLine1") %>% 
+  filter(CellLine %in% clines)
+head(cl.tissue)
+
+#Merge AUC data, cell line and drug annotations
+expr_auc.pre <- gsva.data.all %>% 
+  left_join(knn.data1, by = "CellLine", relationship = "many-to-many") %>% 
+  left_join(cl.tissue, by = "CellLine") %>% 
+  left_join(druglist1, by = "DRUG_NAME") %>% 
+  #filter(!Targets == "Unclassified") %>% 
+  select(AUC, CellLine, CellLine_orig, tissue,
+         Gene_Set, Regulator, Tx_timePoint, 
+         ssGSEA_Score, DRUG_NAME, everything())
+
+head(expr_auc.pre)
+dim(expr_auc.pre)
+
+length(unique(expr_auc.pre$CellLine))
+length(unique(expr_auc.pre$DRUG_NAME))
+sum(is.na(expr_auc.pre))
+
+#PERFORM PEARSON CORRELATION BETWEEN AUC AND ENRICHMENT SCORES
+
+
+#Perform Pearson correlation
+names <- expr_auc.pre %>% 
+  pull(DRUG_NAME) %>% 
+  unique() %>% 
+  as.character() %>% 
+  na.omit()
+
+gs_keep <- expr_auc.pre %>% 
+  pull(Gene_Set) %>%
+  as.character() %>% 
+  unique()
+
+#i <- "Trametinib"
+#j <- gs_keep
+
+d.list <- list()
+
+system.time(
+for (i in names ) {
+  for (j in gs_keep) {
+    
+    print(i)
+    print(j)
+    tmp.d1 <- expr_auc.pre %>% 
+    filter(DRUG_NAME == i,
+           Gene_Set == j)
+    d.list[[j]][[i]] <- cor.test(tmp.d1$ssGSEA_Score, tmp.d1$AUC,
+                     method = "pearson")
+  }
+}
+) 
+#elapsed time = 3.738 seconds
+
+#Extract pearson correlation results
+corTest <- list()
+
+#For loop
+system.time(
+
+for (i in names) {
+  for (j in gs_keep) {
+  print(i)
+  print(j)
+  tmp1 <- d.list[[j]]
+  tmp <- tmp1[[i]]
+  corTest[[j]][[i]] <- data.frame("Pearson_cor" = tmp$estimate,
+                            "pvalue" = tmp$p.value,
+                            "t" = tmp$statistic,
+                            "df" = tmp$parameter,
+                            "method" = tmp$method,
+                            "alternative" = tmp$alternative,
+                            "Gene_Set" = j,
+                            "DRUG_NAME" = i)
+  }
+}
+)
+#Elapsed time = 0.274
+
+
+#Correct for FDR based on each gene set
+corTest_df <- list()
+
+
+for (j in gs_keep) {
+  print(j)
+  
+  corTest_df[[j]] <- ldply(corTest[[j]], .id = NULL) %>% 
+    add_column(fdr = p.adjust(.$pvalue, method = "BH"), .before = "pvalue") %>% 
+    add_column(fwer = p.adjust(.$pvalue, method = "bonferroni"), 
+               .before = "pvalue") %>% 
+    as.data.frame()
+}
+
+
+corTest_df1 <- ldply(corTest_df, .id = NULL) %>% 
+  select(Gene_Set, DRUG_NAME, everything()) %>% 
+  left_join(druglist1, by = "DRUG_NAME")
+
+
+head(corTest_df1)
+
+
+
+#IDENTIFY CANDIDATE ANTI-CANCER DRUGS USING GDSC DATASET AND 
+## SMARCD3 REGULON SIGNATURES
+
+## GENERATE PLOTS COMPARING ssGSEA scores and AUC 
+
+head(expr_auc.pre)
+dim(expr_auc.pre)
+
+#Scale AUC based on drug to standardize values between 0 and 1
+auc.scale <- function(x){(x-min(x))/(max(x)-min(x))}
+
+expr_auc.pre <- expr_auc.pre %>% 
+  as.data.frame() %>% 
+  group_by(DRUG_NAME) %>% 
+  mutate(AUC.scaled = auc.scale(AUC)) %>% 
+  ungroup() %>% 
+  select(AUC, ssGSEA_Score, Gene_Set, CellLine, CellLine_orig, tissue,
+         DRUG_NAME, DrugTarget, DrugActivity, AUC.scaled, everything())
+
+head(expr_auc.pre)
+
+
+#Filter Pearson correlations for fwer <= 0.05
+corTest_df.tmp <- corTest_df1 %>% 
+  filter(pvalue <= 0.05)
+  #filter(fdr <= 0.05) 
+  #filter(fwer <= 0.05)
+#table(corTest_df.tmp$DRUG_NAME)
+
+#Plot
+#library(viridis)
+
+#gene set names
+gs_keep <- corTest_df.tmp$Gene_Set %>% unique
+gs_keep.tmp <- gs_keep
+gs_keep.tmp
+
+#Get top 15 drug candidates with negative pearson correlations
+tmp.n <- corTest_df.tmp %>% 
+  filter(Gene_Set %in% gs_keep.tmp,
+         Pearson_cor <= 0) %>% 
+  #arrange(fwer) %>% 
+  #arrange(fdr) %>% 
+  arrange(pvalue) %>% 
+  select(DRUG_NAME) %>% 
+  slice_head(n = 5) %>% 
+  pull(DRUG_NAME) %>% 
+  as.character()
+
+#Get top 15 drug candidates with positive pearson correlations
+tmp.p <- corTest_df.tmp %>% 
+  filter(Gene_Set %in% gs_keep.tmp,
+         Pearson_cor >= 0) %>% 
+  #arrange(fwer) %>% 
+  arrange(fdr) %>% 
+  select(DRUG_NAME) %>% 
+  slice_head(n = 5) %>% 
+  pull(DRUG_NAME) %>% 
+  as.character()
+
+#Combine
+tmp.np <- c(tmp.n, tmp.p, "selumetinib", "sirolimus")
+
+
+d.tmp <- expr_auc.pre %>% 
+  select(DRUG_NAME, DrugTarget) %>% 
+  unique()
+
+#Get data for mek inhibitors
+drug.keep <-  c("selumetinib", "sirolimus")
+
+#drug.keep <- c("Rapamycin")
+
+#Assign colors to drugs
+mycolor <- expr_auc.pre %>% 
+  select(DRUG_NAME) %>%
+  mutate(col.label = ifelse(DRUG_NAME %in% drug.keep, "#8B0000",
+                             "grey")) %>% 
+  deframe()
+
+
+d.tmp <- expr_auc.pre %>% 
+  select(DRUG_NAME, DrugTarget) %>% 
+  unique()
+
+#Plot first signature
+p1 <- corTest_df1 %>% 
+  filter(Gene_Set %in% gs_keep.tmp) %>% 
+  mutate(label = ifelse(DRUG_NAME %in% c(tmp.np) , "TRUE", "FALSE")) %>% 
+  left_join(d.tmp, by = "DRUG_NAME") %>% 
+  ggplot(mapping = aes(x = Pearson_cor, y = -log(pvalue, base = 10))) +
+  facet_wrap(~Gene_Set) +
+  geom_point(mapping = aes(color = DRUG_NAME), size = 0.4, show.legend = F) +
+  geom_text_repel(mapping = aes(label = ifelse(label == "TRUE", DRUG_NAME, ""),
+                                color = DRUG_NAME
+                                ),
+                  size = 2, fontface = "bold", max.overlaps = 30, 
+                  show.legend = F) +
+  scale_color_manual(values = mycolor) +
+  geom_hline(yintercept = -log(0.05, base = 10), linetype = "dashed", 
+             color = "firebrick") +
+  theme_classic() +
+  theme(strip.text = element_text(size = 7, face = "bold"),
+        axis.line = element_line(linewidth = 1),
+        axis.text = element_text(size = 6, face = "bold"),
+        axis.title = element_text(size = 7, face = "bold")) +
+  annotate(geom = "text", x = 0.2, 
+           y = -log(2, base = 10), size = 1.5,
+           label = "pvalue threshold", color = "firebrick")
+p1
+
+ggsave(file = paste0(cellSamples1, "_", cellSamples2, "_SMARCD3_preTxRegulonSignature_",
+                     "TopPearsonCorrelations.tiff"),
+         device = "tiff", units = "in", width = 3, height = 3, create.dir = T,
+         path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"))
+
+#plot mek inhibitors
+drug.keep.tmp <- drug.keep[1]
+
+mek.cor <- corTest_df1 %>% 
+  filter(DRUG_NAME %in% drug.keep.tmp) %>% 
+  mutate(Pearson_cor = round(Pearson_cor, 3),
+         fwer2 = format.pval(fwer, digits = 3, eps = 2e-16, nsmall = 3),
+         fdr2 = format.pval(fdr, digits = 3, eps = 2e-16, nsmall = 3),
+         pval2 = format.pval(pvalue, digits = 3, eps = 2e-16, nsmall = 3))
+  
+plot.meks <- expr_auc.pre %>% 
+  filter(DRUG_NAME %in% drug.keep.tmp) %>% 
+  mutate(DRUG_NAME = ordered(DRUG_NAME, levels = drug.keep))
+
+mek.p1 <- plot.meks %>% 
+  ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, color = tissue)) +
+  geom_point(size = 2, show.legend = F) +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 10, face = "bold"),
+        legend.title = element_text(size = 10, face = "bold")) +
+  annotate(geom = "text", x = .5, y = 1, size = 4, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2)) +
+                          ", pvalue = ", mek.cor$pval2)) +
+  guides(color = guide_legend(title = "Tissue type", 
+                              override.aes = list(size = 2),
+                              ncol = 2))
+mek.p1
+
+mek.p1.legend <- plot.meks %>% 
+  ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, color = tissue)) +
+  geom_point(size = 2, show.legend = T) +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 7, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold")) +
+  annotate(geom = "text", x = 1.1, y = 1, size = 4, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2)) +
+                          ", FDR = ", mek.cor$fd2)) +
+  guides(color = guide_legend(title = "Tissue type", 
+                              override.aes = list(size = 2),
+                              ncol = 2))
+
+mek.p1.legend <- mek.p1.legend %>% 
+  ggpubr::get_legend() %>% 
+  as_ggplot()
+mek.p1.legend
+
+ggsave(filename = paste0(cellSamples1, "_", cellSamples2, 
+                         "_preTx.SMARCD3.Signature",
+                         "_PearsonCorrelation_dotPlot_LegendOnly.tiff"),
+       device = "tiff", width = 6, height = 5, units = "in", dpi = 300, 
+       path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"), create.dir = T)
+
+#plot rest of mek inhibitors
+i <- drug.keep[1]
+for (i in drug.keep) {
+  
+  print(i)
+  
+  mek.cor <- corTest_df1 %>% 
+  filter(DRUG_NAME %in% i) %>% 
+  mutate(Pearson_cor = round(Pearson_cor, 3),
+         fwer2 = format.pval(fwer, digits = 3, eps = 2e-16, nsmall = 3),
+         fdr2 = format.pval(fdr, digits = 3, eps = 2e-16, nsmall = 3),
+         pval2 = format.pval(pvalue, digits = 3, eps = 2e-16, nsmall = 3))
+  
+  plot.meks <- expr_auc.pre %>% 
+    filter(DRUG_NAME %in% i) %>% 
+    mutate(DRUG_NAME = ordered(DRUG_NAME, levels = drug.keep))
+  
+  plot.meks %>% 
+  filter(DRUG_NAME %in% i) %>% 
+  #ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, group = DRUG_NAME)) +
+  ggscatter(x = "ssGSEA_Score", y = "AUC.scaled",
+            add = "reg.line", cor.method = "pearson",
+            add.params = list(color = "darkred", fill = "lightgray"),
+            conf.int = T, size = 1) +
+  geom_point(size = 1, show.legend = F, color = "lightgrey") +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold")) +
+    #stat_cor(method = "pearson", geom = "line")
+  #annotate(geom = "text", x = 1.29, y = 1.05, size = 3, fontface = "bold",
+    annotate(geom = "text", x = .6, y = 1.05, size = 3, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2))
+                          #", FDR = ", mek.cor$fdr2),
+                           ", pvalue = ", mek.cor$pval2)) 
+  
+  ggsave(filename = paste0(cellSamples1, "_", cellSamples2,
+                           "_preTx.SMARCD3.Signature_", i,
+                         "_PearsonCorrelation_dotPlot_withLegend.tiff"),
+       device = "tiff", width = 4, height = 3, units = "in", dpi = 300, 
+       path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"), create.dir = T)
+}
+```
+
+
+
+```{r}
+#Plot ssGSEA scores (MR regulon Signatures) against AUC
+
+#Set seed
+set.seed(05222025)
+
+#Read in normalized and tidy'd gdsc expression data
+setwd(paste0(dir, dir1, dir2, "/predictiveModelFrameWork_files/"))
+#list.files()
+expr <- fread(file = paste0(cellSamples2, "_222.CellLines_13432.Genes_",
+                            "RMA.Normalized_GeneExpression.txt"),
+       sep = "\t", header = T, quote = "")
+
+#expr <- fread(file = paste0(cellSamples2, "_821.CellLines_18762.Genes_",
+#                            "RMA.Normalized_GeneExpression.txt"),
+#       sep = "\t", header = T, quote = "")
+
+head(expr)[,1:5]
+dim(expr)
+
+expr <- expr %>% 
+  as.data.frame() %>% 
+  column_to_rownames(var = "CellLines") %>% 
+  t()
+head(expr)[,1:5]
+
+
+#Read in ssGSEA scores for preTX MR regulon Signatures
+gsva.H <- fread(file = paste0(cellSamples1, "_222.CellLines_1.PostTx.everSamples",
+                              ".SMARCD3.Signatures_ssGSEA.Scores.txt"),  
+                              #".SMARCD3.Signatures_ssGSEA.Scores.txt"),
+       sep = "\t", header = T, quote = "")
+
+gsva.H[,1:5]
+
+
+#Transform into long format
+gsva.data.all <- gsva.H %>% 
+    as.data.frame() %>% 
+    pivot_longer(!Gene_Set, names_to = "CellLine", 
+               values_to = "ssGSEA_Score") %>%
+    separate(Gene_Set, into = c("Regulator", "Tx_timePoint"), sep = "_", 
+             remove = F, extra = "merge") %>% 
+    select(Gene_Set, ssGSEA_Score, CellLine, Regulator, Tx_timePoint) %>% 
+    mutate_at(vars(Gene_Set, CellLine, Regulator, Tx_timePoint), factor) %>% 
+    mutate_at(vars(ssGSEA_Score), as.numeric)  
+
+head(gsva.data.all)
+dim(gsva.data.all)
+
+
+#Read in auc (knn imputation) data from GDSC1
+auc.knn <- fread(file = paste0(cellSamples1, 
+                               "_222.CellLines_338.Drugs_AUC_knnImputation.txt"),
+                 sep = "\t", header = T, quote = "")
+
+
+dim(auc.knn)
+head(auc.knn)[,1:5]
+
+
+auc.knn <- auc.knn %>% 
+  as.data.frame() %>%
+  column_to_rownames(var = "CellLine") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "DRUG_NAME") %>% 
+  mutate(DRUG_NAME = str_replace_all(DRUG_NAME, pattern = " ", replacement = "_"))
+  
+head(auc.knn)[,1:5]
+dim(auc.knn)
+
+any(gsva.data.all$CellLine %in% colnames(auc.knn)[2:ncol(auc.knn)])
+
+#MERGE CELL LINE AND DRUG INFO TO AUC/ssGSEA DATA FRAME
+
+#Transform into longFormat
+knn.data1 <- auc.knn %>% 
+  as.data.frame() %>% 
+  pivot_longer(!DRUG_NAME, names_to = "CellLine", values_to = "AUC") %>% 
+  unique()
+
+head(knn.data1)
+dim(knn.data1)
+length(unique(knn.data1$CellLine))
+length(unique(knn.data1$DRUG_NAME))
+
+clines <- unique(knn.data1$CellLine)
+drugs <- unique(knn.data1$DRUG_NAME)
+
+
+#Read in drug info
+setwd(paste0(dir, dir1, dir2))
+druglist <- fread(file = paste0("v10.M1.informer_set.txt"),
+                  sep = "\t", header = T, quote = F)
+
+druglist1 <- druglist %>% 
+  rename("DRUG_NAME" = "cpd_name",
+         "DrugTarget" = "gene_symbol_of_protein_target",
+         "DrugActivity" = "target_or_activity_of_compound") %>% 
+  mutate(DRUG_NAME = str_replace_all(DRUG_NAME, 
+                                     pattern = " ", replacement = "_")) %>% 
+  filter(DRUG_NAME %in% unique(knn.data1$DRUG_NAME)) %>% 
+  select(DRUG_NAME, DrugTarget, DrugActivity)
+
+
+#Read in cell line info
+setwd(paste0(dir, dir1, dir2, "/predictiveModelFrameWork_files/"))
+cl.tissue <- fread(file = paste0(cellSamples1, "_", cellSamples2, 
+                                 "_222.CellLines_tissueType.txt"),
+                  sep = "\t", header = T, quote = F)
+
+cl.tissue <- cl.tissue %>% 
+  rename("CellLine_orig" = "CellLine",
+         "CellLine" = "CellLine1") %>% 
+  filter(CellLine %in% clines)
+head(cl.tissue)
+
+#Merge AUC data, cell line and drug annotations
+expr_auc.pre <- gsva.data.all %>% 
+  left_join(knn.data1, by = "CellLine", relationship = "many-to-many") %>% 
+  left_join(cl.tissue, by = "CellLine") %>% 
+  left_join(druglist1, by = "DRUG_NAME") %>% 
+  #filter(!Targets == "Unclassified") %>% 
+  select(AUC, CellLine, CellLine_orig, tissue,
+         Gene_Set, Regulator, Tx_timePoint, 
+         ssGSEA_Score, DRUG_NAME, everything())
+
+head(expr_auc.pre)
+dim(expr_auc.pre)
+
+length(unique(expr_auc.pre$CellLine))
+length(unique(expr_auc.pre$DRUG_NAME))
+sum(is.na(expr_auc.pre))
+
+#PERFORM PEARSON CORRELATION BETWEEN AUC AND ENRICHMENT SCORES
+
+
+#Perform Pearson correlation
+names <- expr_auc.pre %>% 
+  pull(DRUG_NAME) %>% 
+  unique() %>% 
+  as.character() %>% 
+  na.omit()
+
+gs_keep <- expr_auc.pre %>% 
+  pull(Gene_Set) %>%
+  as.character() %>% 
+  unique()
+
+#i <- "Trametinib"
+#j <- gs_keep
+
+d.list <- list()
+
+system.time(
+for (i in names ) {
+  for (j in gs_keep) {
+    
+    print(i)
+    print(j)
+    tmp.d1 <- expr_auc.pre %>% 
+    filter(DRUG_NAME == i,
+           Gene_Set == j)
+    d.list[[j]][[i]] <- cor.test(tmp.d1$ssGSEA_Score, tmp.d1$AUC,
+                     method = "pearson")
+  }
+}
+) 
+#elapsed time = 3.738 seconds
+
+#Extract pearson correlation results
+corTest <- list()
+
+#For loop
+system.time(
+
+for (i in names) {
+  for (j in gs_keep) {
+  print(i)
+  print(j)
+  tmp1 <- d.list[[j]]
+  tmp <- tmp1[[i]]
+  corTest[[j]][[i]] <- data.frame("Pearson_cor" = tmp$estimate,
+                            "pvalue" = tmp$p.value,
+                            "t" = tmp$statistic,
+                            "df" = tmp$parameter,
+                            "method" = tmp$method,
+                            "alternative" = tmp$alternative,
+                            "Gene_Set" = j,
+                            "DRUG_NAME" = i)
+  }
+}
+)
+#Elapsed time = 0.274
+
+
+#Correct for FDR based on each gene set
+corTest_df <- list()
+
+
+for (j in gs_keep) {
+  print(j)
+  
+  corTest_df[[j]] <- ldply(corTest[[j]], .id = NULL) %>% 
+    add_column(fdr = p.adjust(.$pvalue, method = "BH"), .before = "pvalue") %>% 
+    add_column(fwer = p.adjust(.$pvalue, method = "bonferroni"), 
+               .before = "pvalue") %>% 
+    as.data.frame()
+}
+
+
+corTest_df1 <- ldply(corTest_df, .id = NULL) %>% 
+  select(Gene_Set, DRUG_NAME, everything()) %>% 
+  left_join(druglist1, by = "DRUG_NAME")
+
+
+head(corTest_df1)
+
+
+
+#IDENTIFY CANDIDATE ANTI-CANCER DRUGS USING GDSC DATASET AND 
+## SMARCD3 REGULON SIGNATURES
+
+## GENERATE PLOTS COMPARING ssGSEA scores and AUC 
+
+head(expr_auc.pre)
+dim(expr_auc.pre)
+
+#Scale AUC based on drug to standardize values between 0 and 1
+auc.scale <- function(x){(x-min(x))/(max(x)-min(x))}
+
+expr_auc.pre <- expr_auc.pre %>% 
+  as.data.frame() %>% 
+  group_by(DRUG_NAME) %>% 
+  mutate(AUC.scaled = auc.scale(AUC)) %>% 
+  ungroup() %>% 
+  select(AUC, ssGSEA_Score, Gene_Set, CellLine, CellLine_orig, tissue,
+         DRUG_NAME, DrugTarget, DrugActivity, AUC.scaled, everything())
+
+head(expr_auc.pre)
+
+
+#Filter Pearson correlations for fwer <= 0.05
+corTest_df.tmp <- corTest_df1 %>% 
+  filter(pvalue <= 0.05)
+  #filter(fdr <= 0.05) 
+  #filter(fwer <= 0.05)
+#table(corTest_df.tmp$DRUG_NAME)
+
+#Plot
+#library(viridis)
+
+#gene set names
+gs_keep <- corTest_df.tmp$Gene_Set %>% unique
+gs_keep.tmp <- gs_keep
+gs_keep.tmp
+
+#Get top 15 drug candidates with negative pearson correlations
+tmp.n <- corTest_df.tmp %>% 
+  filter(Gene_Set %in% gs_keep.tmp,
+         Pearson_cor <= 0) %>% 
+  #arrange(fwer) %>% 
+  #arrange(fdr) %>% 
+  arrange(pvalue) %>% 
+  select(DRUG_NAME) %>% 
+  slice_head(n = 5) %>% 
+  pull(DRUG_NAME) %>% 
+  as.character()
+
+#Get top 15 drug candidates with positive pearson correlations
+tmp.p <- corTest_df.tmp %>% 
+  filter(Gene_Set %in% gs_keep.tmp,
+         Pearson_cor >= 0) %>% 
+  #arrange(fwer) %>% 
+  arrange(fdr) %>% 
+  select(DRUG_NAME) %>% 
+  slice_head(n = 5) %>% 
+  pull(DRUG_NAME) %>% 
+  as.character()
+
+#Combine
+tmp.np <- c(tmp.n, tmp.p, "selumetinib", "sirolimus")
+
+
+d.tmp <- expr_auc.pre %>% 
+  select(DRUG_NAME, DrugTarget) %>% 
+  unique()
+
+#Get data for mek inhibitors
+drug.keep <-  c("selumetinib", "sirolimus")
+
+#drug.keep <- c("Rapamycin")
+
+#Assign colors to drugs
+mycolor <- expr_auc.pre %>% 
+  select(DRUG_NAME) %>%
+  mutate(col.label = ifelse(DRUG_NAME %in% drug.keep, "#8B0000",
+                             "grey")) %>% 
+  deframe()
+
+
+d.tmp <- expr_auc.pre %>% 
+  select(DRUG_NAME, DrugTarget) %>% 
+  unique()
+
+#Plot first signature
+p1 <- corTest_df1 %>% 
+  filter(Gene_Set %in% gs_keep.tmp) %>% 
+  mutate(label = ifelse(DRUG_NAME %in% c(tmp.np) , "TRUE", "FALSE")) %>% 
+  left_join(d.tmp, by = "DRUG_NAME") %>% 
+  ggplot(mapping = aes(x = Pearson_cor, y = -log(pvalue, base = 10))) +
+  facet_wrap(~Gene_Set) +
+  geom_point(mapping = aes(color = DRUG_NAME), size = 0.4, show.legend = F) +
+  geom_text_repel(mapping = aes(label = ifelse(label == "TRUE", DRUG_NAME, ""),
+                                color = DRUG_NAME
+                                ),
+                  size = 2, fontface = "bold", max.overlaps = 30, 
+                  show.legend = F) +
+  scale_color_manual(values = mycolor) +
+  geom_hline(yintercept = -log(0.05, base = 10), linetype = "dashed", 
+             color = "firebrick") +
+  theme_classic() +
+  theme(strip.text = element_text(size = 7, face = "bold"),
+        axis.line = element_line(linewidth = 1),
+        axis.text = element_text(size = 6, face = "bold"),
+        axis.title = element_text(size = 7, face = "bold")) +
+  annotate(geom = "text", x = 0.2, 
+           y = -log(2, base = 10), size = 1.5,
+           label = "pvalue threshold", color = "firebrick")
+p1
+
+ggsave(file = paste0(cellSamples1, "_", cellSamples2, "_SMARCD3_postTxRegulonSignature_",
+                     "TopPearsonCorrelations.tiff"),
+         device = "tiff", units = "in", width = 3, height = 3, create.dir = T,
+         path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"))
+
+#plot mek inhibitors
+drug.keep.tmp <- drug.keep[1]
+
+mek.cor <- corTest_df1 %>% 
+  filter(DRUG_NAME %in% drug.keep.tmp) %>% 
+  mutate(Pearson_cor = round(Pearson_cor, 3),
+         fwer2 = format.pval(fwer, digits = 3, eps = 2e-16, nsmall = 3),
+         fdr2 = format.pval(fdr, digits = 3, eps = 2e-16, nsmall = 3),
+         pval2 = format.pval(pvalue, digits = 3, eps = 2e-16, nsmall = 3))
+  
+plot.meks <- expr_auc.pre %>% 
+  filter(DRUG_NAME %in% drug.keep.tmp) %>% 
+  mutate(DRUG_NAME = ordered(DRUG_NAME, levels = drug.keep))
+
+mek.p1 <- plot.meks %>% 
+  ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, color = tissue)) +
+  geom_point(size = 2, show.legend = F) +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 10, face = "bold"),
+        legend.title = element_text(size = 10, face = "bold")) +
+  annotate(geom = "text", x = .5, y = 1, size = 4, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2)) +
+                          ", pvalue = ", mek.cor$pval2)) +
+  guides(color = guide_legend(title = "Tissue type", 
+                              override.aes = list(size = 2),
+                              ncol = 2))
+mek.p1
+
+mek.p1.legend <- plot.meks %>% 
+  ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, color = tissue)) +
+  geom_point(size = 2, show.legend = T) +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 7, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold")) +
+  annotate(geom = "text", x = 1.1, y = 1, size = 4, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2)) +
+                          ", FDR = ", mek.cor$fd2)) +
+  guides(color = guide_legend(title = "Tissue type", 
+                              override.aes = list(size = 2),
+                              ncol = 2))
+
+mek.p1.legend <- mek.p1.legend %>% 
+  ggpubr::get_legend() %>% 
+  as_ggplot()
+mek.p1.legend
+
+ggsave(filename = paste0(cellSamples1, "_", cellSamples2, 
+                         "_preTx.SMARCD3.Signature",
+                         "_PearsonCorrelation_dotPlot_LegendOnly.tiff"),
+       device = "tiff", width = 6, height = 5, units = "in", dpi = 300, 
+       path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"), create.dir = T)
+
+#plot rest of mek inhibitors
+i <- drug.keep[1]
+for (i in drug.keep) {
+  
+  print(i)
+  
+  mek.cor <- corTest_df1 %>% 
+  filter(DRUG_NAME %in% i) %>% 
+  mutate(Pearson_cor = round(Pearson_cor, 3),
+         fwer2 = format.pval(fwer, digits = 3, eps = 2e-16, nsmall = 3),
+         fdr2 = format.pval(fdr, digits = 3, eps = 2e-16, nsmall = 3),
+         pval2 = format.pval(pvalue, digits = 3, eps = 2e-16, nsmall = 3))
+  
+  plot.meks <- expr_auc.pre %>% 
+    filter(DRUG_NAME %in% i) %>% 
+    mutate(DRUG_NAME = ordered(DRUG_NAME, levels = drug.keep))
+  
+  plot.meks %>% 
+  filter(DRUG_NAME %in% i) %>% 
+  #ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.scaled, group = DRUG_NAME)) +
+  ggscatter(x = "ssGSEA_Score", y = "AUC.scaled",
+            add = "reg.line", cor.method = "pearson",
+            add.params = list(color = "darkred", fill = "lightgray"),
+            conf.int = T, size = 1) +
+  geom_point(size = 1, show.legend = F, color = "lightgrey") +
+  facet_wrap(~DRUG_NAME) +
+  theme_classic() +
+  theme(axis.line = element_line(linewidth = 1),
+        strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_blank(),
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 10, face = "bold")) +
+    #stat_cor(method = "pearson", geom = "line")
+  #annotate(geom = "text", x = 1.29, y = 1.05, size = 3, fontface = "bold",
+    annotate(geom = "text", x = .6, y = 1.05, size = 3, fontface = "bold",
+           label = paste0("R = ", as.numeric(mek.cor$Pearson_cor), 
+                          #", FWER = ", mek.cor$fwer2))
+                          #", FDR = ", mek.cor$fdr2),
+                           ", pvalue = ", mek.cor$pval2)) 
+  
+  ggsave(filename = paste0(cellSamples1, "_", cellSamples2,
+                           "_preTx.SMARCD3.Signature_", i,
+                         "_PearsonCorrelation_dotPlot_withLegend.tiff"),
+       device = "tiff", width = 4, height = 3, units = "in", dpi = 300, 
+       path = paste0(dir, dir1, dir2, "pearsonCorrelations/figures"), create.dir = T)
+}
+```

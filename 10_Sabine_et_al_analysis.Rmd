@@ -1,0 +1,1865 @@
+---
+title: "sabine data"
+author: "Eric Medina"
+date: "2023-08-04"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+```{r}
+#USE BEADARRAY TO QC SABINE ET AL. 2010 EVEROLIMUS DATA
+
+#Load libraries
+library(beadarray)
+library(GEOquery)
+library(sva)
+library(siggenes)
+library(illuminaHumanv3.db)
+library(illuminaio)
+library(stats)
+library(ggplot2)
+library(data.table)
+library(stringi)
+library(doParallel)
+library(foreach)
+library(GeneBreak)
+library(annotables)
+library(ggpubr)
+library(conflicted)
+library(GSVA)
+library(msigdbr)
+library(rstatix)
+library(tidyverse)
+conflict_prefer_all("dplyr", quiet = T)
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+
+dir1 <- "sabine2010Data"
+dir2 <- "viper/"
+```
+
+
+```{r}
+set.seed(09102024)
+
+.f = function() {
+#DOWNLOAD SABINE ET AL. 2010 EVEROLIMUS DATA TO WORKING DIRECTORY
+setwd(dir = paste0(dir, dir1))
+gse <- getGEOSuppFiles("GSE119262")
+
+#save download information
+rownames(gse) <- c(paste0(dir, dir1, "/GSE119262_RAW.tar"),
+                   paste0(dir, dir1, "GSE119262_non-normalized.txt.gz"))
+gse <- gse %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "path")
+gse
+
+setwd(dir = paste0(dir, dir1))
+fwrite(gse, file = paste0(dir1, "_getGEOSuppFileInfo.txt"), 
+       sep = "\t", row.names = F, col.names = F, quote = F)
+
+
+#Untar raw data
+setwd(dir = paste0(dir, dir1, "/GSE119262"))
+untar(paste0(dir, dir1, "/GSE119262/GSE119262_RAW.tar"))
+}
+
+
+
+#Read in bgx files (microarray)
+setwd(dir = paste0(dir, dir1, "/GSE119262"))
+#list.files()
+bgx <- readBGX("GPL6104_Illumina_HumanRef-8_V2_0_R1_11223162_A.bgx.gz")
+
+#Look at probe corrdinates of a few genes and see which build illumina 
+## humanRef-8 v2 is build from
+
+prob.coor <- bgx$probes
+
+tmp <- prob.coor %>% 
+  slice_head(n = 5) %>% 
+  select(ILMN_Gene, Probe_Coordinates) %>% 
+  arrange(ILMN_Gene) %>% 
+  slice_tail(n = 4)
+tmp
+
+#Get human build hg18/NCbi Build 36.1 (release date 2006)
+data("ens.gene.ann.hg18")
+
+hg18.tmp <- ens.gene.ann.hg18 %>% 
+  filter(Gene %in% tmp$ILMN_Gene) %>% 
+  arrange(Gene)
+
+#Get human build hg19/grch37 (relsease date 2009)
+data("ens.gene.ann.hg19")
+
+hg19.tmp <- ens.gene.ann.hg19 %>% 
+  filter(Gene %in% tmp$ILMN_Gene) %>% 
+  arrange(Gene)
+
+#Visually compare gene start/end coordinates
+tmp
+hg18.tmp
+hg19.tmp
+
+#***PROBES FALL WITHIN NCBI BUILD 36.1/hg18
+
+# Filter out non-protein coding genes
+
+#Get all known NON-PROTEIN coding genes from grch37 and grch38 (not all protein
+## coding gene symbols are the same in hg18 vs h19/grch37 and hg38/grch38)
+tmp.37 <- grch37 %>% 
+  filter(!biotype == "protein_coding") %>% 
+  select(symbol) %>% 
+  unique() %>% 
+  arrange(symbol)
+
+tmp.38 <- grch38 %>% 
+  filter(!biotype == "protein_coding") %>% 
+  select(symbol) %>% 
+  unique() %>% 
+  arrange(symbol)
+
+#Merge
+tmp.nonP <- tmp.37 %>% 
+  full_join(tmp.38, by = colnames(.))
+  
+prob.coor_p <- prob.coor %>% 
+  filter(!ILMN_Gene %in% tmp.nonP$symbol) %>% 
+  arrange(Probe_Id)
+head(prob.coor_p)[,1:14]
+
+#Non normalized micro array data downloaded
+setwd(dir = paste0(dir, dir1, "/GSE119262"))
+#list.files()
+nonNormCounts <- fread("GSE119262_non-normalized.txt.gz", 
+                       sep = "\t", header = T, quote = "") %>% 
+  arrange(ID_REF)
+
+head(nonNormCounts)[,1:7]
+
+#Filter out non-coding genes
+nonNormCounts <- nonNormCounts  %>% 
+  filter(ID_REF %in% prob.coor_p$Probe_Id)
+
+#Match genes to probes id
+prob.coor_p <- prob.coor_p %>% 
+  filter(Probe_Id %in% nonNormCounts$ID_REF)
+
+#which were filter out?
+tmp.l <- prob.coor %>% 
+  filter(!Probe_Id %in% prob.coor_p$Probe_Id)
+
+
+#Replace colnames with patient IDs
+
+#Read in file with sample annotations
+#Downloaded patient information from series matrix
+#https://ftp.ncbi.nlm.nih.gov/geo/series/GSE119nnn/GSE119262/matrix/
+setwd(dir = paste0(dir, dir1))
+#list.files()
+p.annots <- fread(file = paste0("GSE119262_series_matrix_v2.txt"),
+                         sep = "\t", header = F, quote = "", fill = T)
+head(p.annots)[,1:5]
+
+#Remove patients 1 and 20 (only pre samples)
+not.keep <- c("SAMPLE_1", "SAMPLE_2", "SAMPLE_51", "SAMPLE_52")
+
+p.annots2 <- p.annots[29:70,] %>% 
+  column_to_rownames(var = "V1") %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  separate(sample, into = c("sample.num", "junk", "Patient"), sep = " ", remove = T) %>% 
+  unite(sample, c(sample.num, junk),sep = "_", remove = T) %>% 
+  separate(Patient, into = c("Patient", "Pre_Post.sample"), sep = "[.]", remove = F) %>% 
+  separate(Pre_Post.sample, into = c("Tx_TimePoint", "Replicate")) %>% 
+  mutate(sample = gsub(pattern = "[:]", replacement = "", sample)) %>% 
+  mutate(Rep = ifelse(Replicate == "Replicate1", "rep1", "rep2")) %>% 
+  unite(Patient_v2, c("Patient", "Tx_TimePoint"), sep = "_", remove = F) %>% 
+  unite(Patient_v3, c("Patient", "Tx_TimePoint", "Rep"), sep = "_", remove = F) %>% 
+  remove_rownames() %>% 
+  mutate(pAKT_response = str_replace_all(pAKT_response, 
+                                         pattern = "pakt_response: ",
+                                         replacement = ""),
+         pAKT_response = str_replace_all(pAKT_response, 
+                                         pattern = "-",
+                                         replacement = ""),
+         ki67_response = str_replace_all(ki67_response, 
+                                         pattern = "ki67_response: ",
+                                         replacement = ""),
+         ki67_response = str_replace_all(ki67_response, 
+                                         pattern = "-",
+                                         replacement = ""),
+         ki67_change = str_replace_all(ki67_change, 
+                                         pattern = "changeki67: ",
+                                         replacement = ""),
+         her2_status = str_replace_all(her2_status, 
+                                         pattern = "her2_status: ",
+                                         replacement = ""),
+         er_status = str_replace_all(er_status, 
+                                         pattern = "er_status: ",
+                                         replacement = ""),
+         pr_status = str_replace_all(pr_status, 
+                                         pattern = "pr_status: ",
+                                         replacement = ""),
+         batch = str_replace_all(batch, 
+                                 pattern = "Batch number: ",
+                                 replacement = "")) %>%
+  mutate(Treatment = ifelse(Tx_TimePoint == "Post", "Everolimus",
+                     ifelse(Tx_TimePoint == "Pre", "NoTx", "error"))) %>% 
+  filter(!sample %in% not.keep) %>% 
+  select(sample, Patient, Patient_v2, Patient_v3, Tx_TimePoint, Treatment,
+         Replicate, geo_accessionID, pAKT_response, ki67_response, ki67_change,
+         her2_status, er_status, pr_status, batch, tissue, gender, everything())
+
+head(p.annots2)[,1:14]
+
+pre.samples <- p.annots2 %>% 
+  filter(Tx_TimePoint == "Pre")
+head(pre.samples)
+
+post.samples <- p.annots2 %>% 
+  filter(Tx_TimePoint == "Post")
+head(post.samples)
+
+#Get patient ids to match to expression data
+names <- p.annots2 %>% 
+  select(sample, Patient_v3)
+head(names)
+
+#Gene expression in long format to match to patients ids
+nonNormCounts <- nonNormCounts %>% 
+  as.data.frame() %>% 
+  pivot_longer(!ID_REF, names_to = "sample", values_to = "ge") %>% 
+  filter(str_detect(sample, pattern = "AVG_Signal.")) %>% 
+  separate(sample, into = c("avg.sig", "sample"), remove = F, sep = "[.]") %>% 
+  mutate(sample = str_replace_all(sample, pattern = " ", replacement = "_")) %>% 
+  filter(!sample %in% not.keep) %>% 
+  left_join(names, by = "sample") %>% 
+  select(ID_REF, Patient_v3, ge) %>% 
+  pivot_wider(names_from = "Patient_v3", values_from = ge)
+
+head(nonNormCounts)[,1:5]  
+
+
+#Replace probe IDs with gene symbols
+
+if (all(nonNormCounts$ID_REF == prob.coor_p$Probe_Id)) {
+  print("probe IDs match")
+  
+  #Replace prob ids with gene symbols
+  g.symbols <- prob.coor_p %>% 
+    select(Probe_Id, ILMN_Gene) %>% 
+    rename("ID_REF" = "Probe_Id")
+  head(g.symbols)
+  
+  #Joing probe IDs/Gene symbol and remove prove IDs
+  nonNormCounts <- nonNormCounts %>% 
+    left_join(g.symbols, by = "ID_REF") %>% 
+    select(-c(ID_REF)) %>% 
+    select(ILMN_Gene, everything())
+} else {stop(print("names do not match"))}
+head(nonNormCounts)[,1:7]
+
+
+#Take sum of transcirpts mapping to same gene symbol (targeting different 
+## isoforms of same gene. Analyze at Gene level here.)
+#Get genes with multiple Gene Symbols (multiple transcripts)
+en_ids <- nonNormCounts %>%
+  dplyr::select(ILMN_Gene) %>%
+  group_by(ILMN_Gene) %>% 
+  summarise(count = n()) %>% 
+  filter(count > 1) %>% 
+  pull(ILMN_Gene) %>% 
+  as.character()
+
+#Remove duplicate genes and keep unique genes
+tmp.expr1.1 <- nonNormCounts %>% 
+  filter(!ILMN_Gene %in% en_ids)
+
+#Filter for duplicated genes
+tmp.expr1.2 <- nonNormCounts %>% 
+  filter(ILMN_Gene %in% en_ids)
+
+#For loop to combine counts for duplicated gene symbols (Transcripts)
+## (Sabine et al. 2010oOutput was estimated per transcript)
+
+tmp1 <- list()
+
+#i <- "SMARCD3"
+#x <- sample(en_ids, 4)
+#x <- c(x, "SMARCD3")
+
+start <- Sys.time()
+for (i in en_ids) {
+#for (i in x) {
+  print(i)
+  
+  #tmp <- tmp.expr1.2 %>% 
+  tmp1[[i]] <- tmp.expr1.2 %>% 
+    as.data.frame() %>% 
+    filter(ILMN_Gene == i) %>% 
+    select(-ILMN_Gene) %>% 
+    #colMeans() %>% 
+    colSums() %>% 
+    as.data.frame() %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    mutate(ILMN_Gene = i, .before = colnames(.)[1]) %>% 
+    remove_rownames()
+}
+
+end <- Sys.time()
+print(end-start)
+#Time difference of 27.60339 secs
+
+#merge list into one dataframe
+x2 <- plyr::ldply(tmp1, data.frame, .id = NULL)
+
+#Merge with counts with unique names
+nonNormCounts1 <- tmp.expr1.1 %>% 
+  full_join(x2) %>% 
+  arrange(ILMN_Gene) %>% 
+  column_to_rownames(var = "ILMN_Gene") %>% 
+  as.matrix()
+head(nonNormCounts1)[,1:7]
+
+#Get first instance of gene symbol
+prob.coor_p <- prob.coor_p %>% 
+  group_by(ILMN_Gene) %>% 
+  arrange(RefSeq_ID) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  as.data.frame() %>% 
+  arrange(ILMN_Gene)
+
+#Put expression data, probe info, patient data into expression set object
+pheno1 <- p.annots2
+
+dim(nonNormCounts1)
+dim(prob.coor_p)
+dim(pheno1)
+
+
+#make sure this has DEGs for specific phenotype
+exprs <- nonNormCounts1
+
+class(nonNormCounts1)
+
+#patient/phenotype data
+pData <- pheno1 %>% 
+  column_to_rownames(var = "Patient_v3") %>% 
+  mutate(Patient_v3 = rownames(.)) %>% 
+  select(sample, Patient, Patient_v2, Patient_v3, everything())
+
+all(rownames(pData)==colnames(nonNormCounts1))
+
+#Metadata - label description
+tmp.c <- colnames(pData)
+tmp.r <- colnames(pData)
+
+metadata <- data.frame(labelDescription=
+ tmp.c,
+ row.names=tmp.r)
+
+all(rownames(metadata) == colnames(pData))
+
+#Store patient data
+phenoData <- new("AnnotatedDataFrame",
+                 data=pData, varMetadata=metadata)
+
+#Feature data
+fData <- prob.coor_p %>% 
+  arrange(ILMN_Gene) %>% 
+  column_to_rownames(var = "ILMN_Gene")
+head(fData)
+
+all(rownames(fData) == rownames(nonNormCounts1))
+
+tmp.c <- colnames(fData)
+tmp.r <- colnames(fData)
+
+metadata <- data.frame(labelDescription = tmp.c, row.names=tmp.r)
+
+
+
+featureData <- new("AnnotatedDataFrame",
+                   data = fData, varMetadata = metadata)
+
+
+experimentData <- new("MIAME",
+ name="Eric Medina",
+ lab="Nath/Bild Lab",
+ contact="emedinacastaned@coh.org",
+ title="Sabine et al. 2010",
+ abstract="ExpressionSet object with nonNormalized Micro array",
+ url="www.lab.not.exist",
+ other=list(
+ notes="Illumina HumanRef-8 v2 micro array and patient data"
+ ))
+
+eset <- ExpressionSet(assayData = nonNormCounts1,
+                      phenoData = phenoData,
+                      featureData = featureData,
+                      experimentData=experimentData,
+                      annotation = "HumanRef-8 v2")
+
+eset
+
+# Convert into ExpresssionSetIllumina:
+summaryData <- as(eset, Class = "ExpressionSetIllumina", strict = T)
+summaryData
+
+head(exprs(summaryData))[,1:5]
+
+head(fData(summaryData))
+names(fData(summaryData))
+
+table(fData(summaryData)[, "Species"])
+
+head(pData(summaryData))[,1:13]
+names(pData(summaryData))
+
+channelNames(summaryData)
+affy::sampleNames(summaryData)
+
+
+.f = function() {
+#EXPLORATORY ANALYSIS USING BOXPLOTS
+#Look at genes of interest in expression data
+
+#Smarcd3
+ids <- which(fData(summaryData)[,"Symbol"] == "SMARCD3")
+boxplot(summaryData[ids], SampleGroup = "ki67_response", probeFactor = "Symbol")
+}
+
+
+#6: Normalization 
+
+#Correct for differences in expression level across a chip and between chips
+## need to normalize signal to make arrays comparable. 
+## Options:
+## affy package: normalization
+## lumi package:  variance-stabilizing transformation
+## These can be applied using normaliseIllumina function
+
+#Quantile normalization
+summaryData <- normaliseIllumina(summaryData, method="quantile", transform="log2")
+
+
+
+#7: Filtering
+
+#Filtering out non-responding probes from further analysis can improve power
+## to detect differential expression.
+## 1. Remove probes with sequences that have undesirable properties. Four basic
+## annotation quality categories ("Perfect", "Good", "Bad", "No match") are 
+## defined and shown to correlate with expression level and measures of 
+## differential expression.
+## Recommend removing probes assigned a "Bad", or "No match" quality score
+## after normalization. (Similar to common practice of removing lowly-expressed
+## probes but with additional benefit of discarding probes with a high 
+## expression level caused by non-specific hybridization)
+
+ids <- summaryData@featureData@data$Probe_Id
+qual <- unlist(mget(ids, illuminaHumanv3PROBEQUALITY, ifnotfound=NA))
+table(qual)
+
+#remove 
+rem <- qual == "No match" | qual == "Bad" | is.na(qual)
+
+rem <- rem %>% 
+  as.data.frame() %>% 
+  rename("fil" = ".") %>% 
+  rownames_to_column(var = "Probe_Id")
+
+tmp <- summaryData@featureData@data %>% 
+  filter(Probe_Id %in% rem$Probe_Id) %>% 
+  select(Probe_Id, Symbol) %>% 
+  left_join(rem, by = "Probe_Id") %>% 
+  select(-c(Probe_Id)) %>% 
+  spread(key = "Symbol", value = "fil") %>% 
+  unlist(as.list(.))
+
+head(tmp)
+
+summaryData1 <- summaryData[!tmp,]
+dim(exprs(summaryData1))
+
+
+#Plot mean vs variance
+summ <- exprs(summaryData1) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Symbol") %>% 
+  pivot_longer(!Symbol, names_to = "sample", values_to = "expr") %>% 
+  group_by(Symbol) %>% 
+  summarise(m.c = mean(expr),
+            v.c = var(expr)) %>% 
+  ungroup()
+ggplot(summ, mapping = aes(x = log(m.c, base = 2), y = log(v.c, base = 2))) +
+#ggplot(summ1, mapping = aes(x = m.c, y = v.c)) +
+   geom_point()
+ggplot(summ, mapping = aes(y = log(v.c, base = 2))) +
+  geom_density()
+
+
+q <- quantile(log(summ$v.c, base = 2),
+              probs = seq(0,1,.10)
+              ) %>% 
+  as.data.frame() %>% 
+  round(., digits = 2)
+q
+
+lv <- summ %>% 
+  filter(log(v.c, base = 2) >= q$.[3]) %>% 
+  pull(Symbol) %>% 
+  as.character()
+
+summ1 <- summ %>% 
+  filter(Symbol %in% lv)
+
+ggplot(summ1, mapping = aes(x = log(m.c, base = 2), y = log(v.c, base = 2))) +
+#ggplot(summ1, mapping = aes(x = m.c, y = v.c)) +
+   geom_point()
+
+ggplot(summ1, mapping = aes(y = log(v.c, base = 2))) +
+  geom_density()
+
+#plot density 
+plotDensities(exprs(summaryData1)[,1])
+
+
+plotMDS(exprs(summaryData1), labels = summaryData1@phenoData@data$Patient_v2, 
+        cex = 0.7, 
+        dim.plot = c(1,2)
+        )
+title(main="Average (root-mean-square) of largest logFC changes"
+      #xlab="Log-cpm"
+      )
+
+summaryData1 <- summaryData1[lv,]
+dim(exprs(summaryData1))
+
+#plot density 
+plotDensities(exprs(summaryData1)[,1])
+
+#ADJUST BATCH EFFECTS WITH COMBAT
+
+pData <- pData(summaryData1)
+edata <- exprs(summaryData1)
+
+batch <- pData$batch
+modcombat <- model.matrix(~1, data=pData)
+#modcancer <- model.matrix(~pAKT_response + ki67_response, data=pData)
+combat_edata <- ComBat(dat=edata, batch=batch, mod=modcombat, 
+                       par.prior=TRUE, prior.plots=FALSE)
+
+
+#combat_fit <- lm.fit(modcancer, t(combat_edata))
+#hist(combat_fit$coefficients[2,],col=2,breaks=100)
+
+combat_edata <- combat_edata %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "s") %>% 
+  filter(s %in% lv) %>% 
+  column_to_rownames(var = "s") %>% 
+  as.matrix()
+
+#Put data in object
+summaryData1@assayData$exprs <- combat_edata
+
+
+head(combat_edata)[,1:5] 
+dim(combat_edata)
+
+#IF NEEDED: Read in RMA-normalized/batch corrected micro-array data (combat_edata)
+## and pData at bottom of scripts
+
+
+b.data <- combat_edata %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene") %>% 
+  pivot_longer(!Gene, names_to = "Patient_v3", values_to = "Expression") %>% 
+  left_join(pData, by = "Patient_v3") %>% 
+  mutate(pAKT_response2 = ordered(pAKT_response, 
+                                  levels = c("Responder_pAKT", 
+                                             "NonResponder_pAKT")),
+         ki67_response2 = ordered(ki67_response, 
+                                  levels = c("Responder_Ki67", 
+                                             "NonResponder_Ki67")),
+         Treatment2 = ordered(Treatment, levels = c("NoTx", "Everolimus")),
+         Tx_TimePoint2 = ifelse(Tx_TimePoint == "Pre", "Pre.Treatment_Sample",
+                                "Post.Treatment_Sample"),
+         Tx_TimePoint2 = ordered(Tx_TimePoint2, 
+                                 levels = c("Pre.Treatment_Sample",
+                                            "Post.Treatment_Sample"))) %>% 
+  unite(Tx.TimePoint_pAKT, c("Tx_TimePoint", "pAKT_response2"), 
+        sep = "_", remove = F) %>%
+  unite(Tx.TimePoint_ki67, c("Tx_TimePoint", "ki67_response2"), 
+        sep = "_", remove = F) %>%
+  mutate(Tx.TimePoint_pAKT = ordered(Tx.TimePoint_pAKT, 
+                                     levels = c("Pre_Responder_pAKT",
+                                                "Pre_NonResponder_pAKT",
+                                                "Post_Responder_pAKT",
+                                                "Post_NonResponder_pAKT"))) %>%
+  mutate(Tx.TimePoint_ki67 = ordered(Tx.TimePoint_ki67, 
+                                     levels = c("Pre_Responder_Ki67",
+                                                "Pre_NonResponder_Ki67",
+                                                "Post_Responder_Ki67",
+                                                "Post_NonResponder_Ki67"))) 
+
+
+#SAM AND PLOTS
+
+#strings
+classif <- "Responder_pAKT"
+txtime <- "Pre"
+
+#Get names of resistance regulon candidates
+setwd(dir = paste0(dir, dir2, "preTx2/"))
+#list.files()
+keep <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers",
+                            "_SMARCD3_ResistantRegulon_candidates_v5.txt"), 
+              sep = "\t", header = T, quote = "") %>% 
+  colnames()
+#keep <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_leading_edge_TOP_",
+#                            "ResistantRegulon_candidates_v5.txt"), 
+#              sep = "\t", header = T, quote = "") %>% 
+#  colnames()
+
+tmp <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  #rownames_to_column(var = "Patient_v3") %>% 
+  select(sample, pAKT_response) 
+
+#Create vector for unpaired groups with 
+tmp <- tmp %>% 
+  mutate(cl = ifelse(pAKT_response == classif,
+                     0,1)) 
+  
+tmp.cl <- tmp$cl
+
+pData.pre <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  pull(Patient_v3) %>% 
+  unique()
+
+tmp.expr <- combat_edata %>% 
+  as.data.frame() %>% 
+  select(all_of(pData.pre))
+
+sam.out <- sam(tmp.expr, tmp.cl, method = wilc.stat, rand = 123)
+sam.out
+
+#Find delta 
+sam.out2 <- findDelta(sam.out, fdr = 0.05) %>% 
+  as.data.frame() %>% 
+  filter(FDR <= 0.05) %>% 
+  as.data.frame()
+
+delta <- sam.out2$Delta
+genes.called <- sam.out2$Called
+delta.fdr <- sam.out2$FDR
+
+sam.analysis <- summary(sam.out, delta)
+
+samout.pakt.pre <- sam.analysis@mat.sig %>% 
+  as.data.frame() %>% 
+  mutate(fdr = p.adjust(rawp, method = "BH")) %>% 
+  add_significance(p.col = "fdr") %>% 
+  rownames_to_column(var = "Gene") %>% 
+  remove_rownames() %>% 
+  arrange(desc(d.value))  %>% 
+  mutate(delta = delta,
+         delta.fdr = delta.fdr,
+         genes.called = genes.called)
+
+samout.pakt.pre %>% 
+  filter(Gene %in% keep)
+
+#Plot
+comparisons <- list(c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT"),
+                    c("Post_Responder_pAKT", "Post_NonResponder_pAKT"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT",
+                    "Post_Responder_pAKT", "Post_NonResponder_pAKT")
+
+pre.post.pAKT <- b.data %>% 
+  #filter(Gene %in% keep, 
+  filter(Gene %in% keep[1], #For single image of smarcd3
+  #filter(Gene %in% keep[2], #For single image of ppara
+         #Tx_TimePoint == txtime
+         ) %>%
+  mutate(Gene = ordered(Gene, levels = keep)) %>% 
+  ggplot(mapping = aes(x = Tx.TimePoint_pAKT, y = Expression)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_pAKT),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_pAKT),
+               alpha = 0.05, width = 0.3, color = "grey") +
+  geom_point(size = .05) +
+  #labs(title = "Pre_treatment samples") +
+  theme_classic() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 8, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 9, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        legend.title = element_text(size = 9, face = "bold"),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.key.size = unit(1, "lines")) +
+    facet_wrap(~Gene, scales = "free", ncol = 1) +
+  guides(fill = guide_legend(title = "pAKT patient classification",
+                             override.aes = list(size = 0.05))) +
+  stat_compare_means(
+                     comparisons = comparisons,
+                     method = "t.test",
+                     aes(label = after_stat(p.signif))
+                     ) +
+  ylab("Gene Expression") +
+  xlab("") + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+pre.post.pAKT
+
+
+#ki67: preTx
+
+#strings
+classif <- "Responder_Ki67"
+txtime <- "Pre"
+
+tmp <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  select(sample, ki67_response) 
+
+#Create vector for unpaired groups with 
+tmp <- tmp %>% 
+  mutate(cl = ifelse(ki67_response == classif,
+                     0,1)) 
+  
+tmp.cl <- tmp$cl
+
+pData.pre <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  pull(Patient_v3) %>% 
+  unique()
+
+tmp.expr <- combat_edata %>% 
+  as.data.frame() %>% 
+  select(all_of(pData.pre))
+
+sam.out <- sam(tmp.expr, tmp.cl, method = wilc.stat, rand = 123)
+sam.out
+
+#Find delta 
+sam.out2 <- findDelta(sam.out, fdr = 0.05) %>% 
+  as.data.frame() %>% 
+  filter(FDR <= 0.05) %>% 
+  as.data.frame()
+
+delta <- sam.out2$Delta
+genes.called <- sam.out2$Called
+delta.fdr <- sam.out2$FDR
+
+sam.analysis <- summary(sam.out, delta)
+
+samout.ki67.pre <- sam.analysis@mat.sig %>% 
+  as.data.frame() %>% 
+  mutate(fdr = p.adjust(rawp, method = "BH")) %>% 
+  add_significance(p.col = "fdr") %>% 
+  rownames_to_column(var = "Gene") %>% 
+  remove_rownames() %>% 
+  arrange(desc(d.value))  %>% 
+  mutate(delta = delta,
+         delta.fdr = delta.fdr,
+         genes.called = genes.called)
+
+samout.ki67.pre %>% 
+  filter(Gene %in% keep)
+
+#plot ki67
+comparisons <- list(c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67"),
+                    c("Post_Responder_Ki67", "Post_NonResponder_Ki67"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67",
+                    "Post_Responder_Ki67", "Post_NonResponder_Ki67")
+
+pre.post.ki67 <- b.data %>% 
+  #filter(Gene %in% keep, 
+  filter(Gene %in% keep[1], #For single image of smarcd3
+  #filter(Gene %in% keep[2], #For single image of ppara
+         #Tx_TimePoint == txtime
+         ) %>%
+  mutate(Gene = ordered(Gene, levels = keep)) %>%  
+  ggplot(mapping = aes(x = Tx.TimePoint_ki67, y = Expression)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_ki67),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_ki67),
+               alpha = 0.05, width = 0.3, color = "grey") +
+  geom_point(size = .05) +
+  #labs(title = "Pre_treatment samples") +
+  theme_classic() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 8, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 9, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        legend.title = element_text(size = 9, face = "bold"),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.key.size = unit(1, "lines")) +
+    facet_wrap(~Gene, scales = "free", ncol = 1) +
+  guides(fill = guide_legend(title = "KI67 patient classification",
+                             override.aes = list(size = 0.05))) +
+  stat_compare_means(
+                     comparisons = comparisons,
+                     method = "t.test",
+                     aes(label = after_stat(p.signif))
+                     ) +
+  ylab("Gene Expression") +
+  xlab("") + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+pre.post.ki67
+
+
+#Post treatment candidates
+
+#Get names of resistance regulon candidates
+setwd(dir = paste0(dir, dir2, "postTx2/"))
+#list.files()
+keep <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_leading_edge_TOP_",
+                            "ResistantRegulon_candidates_v5.txt"), 
+              sep = "\t", header = T, quote = "") %>% 
+  colnames()
+
+#post pAKT
+
+#strings
+classif <- "Responder_pAKT"
+txtime <- "Post"
+
+tmp <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  select(sample, pAKT_response) 
+
+#Create vector for unpaired groups with 
+tmp <- tmp %>% 
+  mutate(cl = ifelse(pAKT_response == classif,
+                     0,1)) 
+  
+tmp.cl <- tmp$cl
+
+pData.pre <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  pull(Patient_v3) %>% 
+  unique()
+
+tmp.expr <- combat_edata %>% 
+  as.data.frame() %>% 
+  select(all_of(pData.pre))
+
+sam.out <- sam(tmp.expr, tmp.cl, method = wilc.stat, rand = 123)
+sam.out
+
+#Find delta 
+sam.out2 <- findDelta(sam.out, fdr = 0.05) %>% 
+  as.data.frame() %>% 
+  filter(FDR <= 0.05) %>% 
+  as.data.frame()
+
+delta <- sam.out2$Delta
+genes.called <- sam.out2$Called
+delta.fdr <- sam.out2$FDR
+
+sam.analysis <- summary(sam.out, delta)
+
+samout.pakt.post  <- sam.analysis@mat.sig %>% 
+  as.data.frame() %>% 
+  mutate(fdr = p.adjust(rawp, method = "BH")) %>% 
+  add_significance(p.col = "fdr") %>% 
+  rownames_to_column(var = "Gene") %>% 
+  remove_rownames() %>% 
+  arrange(desc(d.value))  %>% 
+  mutate(delta = delta,
+         delta.fdr = delta.fdr,
+         genes.called = genes.called)
+
+samout.pakt.post %>% 
+  filter(Gene %in% keep)
+
+
+#ki67: postTx sam analysis
+
+#strings
+classif <- "Responder_Ki67"
+
+tmp <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  select(sample, ki67_response) 
+
+#Create vector for unpaired groups with 
+tmp <- tmp %>% 
+  mutate(cl = ifelse(ki67_response == classif,
+                     0,1)) 
+  
+tmp.cl <- tmp$cl
+
+pData.pre <- pData %>% 
+  filter(Tx_TimePoint == txtime) %>% 
+  pull(Patient_v3) %>% 
+  unique()
+
+tmp.expr <- combat_edata %>% 
+  as.data.frame() %>% 
+  select(all_of(pData.pre))
+
+sam.out <- sam(tmp.expr, tmp.cl, method = wilc.stat, rand = 123)
+sam.out
+
+#Find delta 
+sam.out2 <- findDelta(sam.out, fdr = 0.05) %>% 
+  as.data.frame() %>% 
+  filter(FDR <= 0.05) %>% 
+  as.data.frame()
+
+delta <- sam.out2$Delta
+genes.called <- sam.out2$Called
+delta.fdr <- sam.out2$FDR
+
+sam.analysis <- summary(sam.out, delta)
+
+samout.ki67.post <- sam.analysis@mat.sig %>% 
+  as.data.frame() %>% 
+  mutate(fdr = p.adjust(rawp, method = "BH")) %>% 
+  add_significance(p.col = "fdr") %>% 
+  rownames_to_column(var = "Gene") %>% 
+  remove_rownames() %>% 
+  arrange(desc(d.value))  %>% 
+  mutate(delta = delta,
+         delta.fdr = delta.fdr,
+         genes.called = genes.called)
+
+samout.ki67.post %>% 
+  filter(Gene %in% keep)
+
+
+.f = function() { 
+#Make plots for HNF4G and ZNF100, ZBTB21
+
+#Read in unnormalized data
+setwd(paste0(dir, dir1))
+#summaryData1 <- readRDS(file = paste0(dir1, "_ExpressionSetIllumina.rds"))
+
+#Read in patient metadata
+pData <- fread(file = paste0(dir1, "_PatientMetadata.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  select(Patient_v3, Patient, Patient_v2, Tx_TimePoint, Treatment, Replicate,
+         pAKT_response, ki67_response)
+
+tmp <- exprs(summaryData1) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene") %>% 
+  pivot_longer(!Gene, names_to = "Sample", values_to = "Expression") %>% 
+  filter(Gene %in% keep[c(1:3,5,6)]) %>% 
+  rename("Patient_v3" = "Sample") %>% 
+  left_join(pData, by = "Patient_v3") %>% 
+  mutate(pAKT_response2 = ordered(pAKT_response, 
+                                  levels = c("Responder_pAKT", 
+                                             "NonResponder_pAKT")),
+         ki67_response2 = ordered(ki67_response, 
+                                  levels = c("Responder_Ki67", 
+                                             "NonResponder_Ki67")),
+         Treatment2 = ordered(Treatment, levels = c("NoTx", "Everolimus")),
+         Tx_TimePoint2 = ifelse(Tx_TimePoint == "Pre", "Pre.Treatment_Sample",
+                                "Post.Treatment_Sample"),
+         Tx_TimePoint2 = ordered(Tx_TimePoint2, 
+                                 levels = c("Pre.Treatment_Sample",
+                                            "Post.Treatment_Sample"))) %>% 
+  unite(Tx.TimePoint_pAKT, c("Tx_TimePoint", "pAKT_response2"), 
+        sep = "_", remove = F) %>%
+  unite(Tx.TimePoint_ki67, c("Tx_TimePoint", "ki67_response2"), 
+        sep = "_", remove = F) %>%
+  mutate(Tx.TimePoint_pAKT = ordered(Tx.TimePoint_pAKT, 
+                                     levels = c("Pre_Responder_pAKT",
+                                                "Pre_NonResponder_pAKT",
+                                                "Post_Responder_pAKT",
+                                                "Post_NonResponder_pAKT"))) %>%
+  mutate(Tx.TimePoint_ki67 = ordered(Tx.TimePoint_ki67, 
+                                     levels = c("Pre_Responder_Ki67",
+                                                "Pre_NonResponder_Ki67",
+                                                "Post_Responder_Ki67",
+                                                "Post_NonResponder_Ki67")))
+
+#Plot pakt
+comparisons <- list(c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT"),
+                    c("Post_Responder_pAKT", "Post_NonResponder_pAKT"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT",
+                    "Post_Responder_pAKT", "Post_NonResponder_pAKT")
+
+tmp %>% 
+  filter(Gene %in% keep[c(1:3,5,6)]) %>% 
+ggplot(mapping = aes(x = Tx.TimePoint_pAKT, y = Expression)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_pAKT),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_pAKT),
+               alpha = 0.05, width = 0.3, color = "grey") +
+  geom_point(size = .05) +
+  #labs(title = "Pre_treatment samples") +
+  theme_classic() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 7, face = "bold"),
+        strip.text.x = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 7, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold"),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.key.size = unit(1, "lines")) +
+    facet_wrap(~Gene, scales = "free", ncol = 2) +
+  guides(fill = guide_legend(title = "pAKT patient classification",
+                             override.aes = list(size = 0.05))) +
+  stat_compare_means(
+                     comparisons = comparisons,
+                     method = "t.test",
+                     aes(label = after_stat(p.signif))
+                     ) +
+  ylab("Gene Expression") +
+  xlab("") + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+
+#Save pre treatment pAKT plot
+ggsave(filename = paste0(dir1, "_TFcandidatesResistanceRegulonsExpression",
+                         "_HNF4G_ZNF100_Pre.Post_Tx.pAKT_ggplot.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       path = paste0(dir, dir1, "/figures"), width = 6, height = 2)
+
+
+
+#plot ki67
+comparisons <- list(c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67"),
+                    c("Post_Responder_Ki67", "Post_NonResponder_Ki67"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67",
+                    "Post_Responder_Ki67", "Post_NonResponder_Ki67")
+tmp %>% 
+  filter(Gene %in% keep[c(1:3,5,6)]) %>%
+  ggplot(mapping = aes(x = Tx.TimePoint_ki67, y = Expression)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_ki67),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_ki67),
+               alpha = 0.05, width = 0.3, color = "grey") +
+  geom_point(size = .05) +
+  #labs(title = "Pre_treatment samples") +
+  theme_classic() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 7, face = "bold"),
+        strip.text.x = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 7, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold"),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.key.size = unit(1, "lines")) +
+    facet_wrap(~Gene, scales = "free", ncol = 2) +
+  guides(fill = guide_legend(title = "KI67 patient classification",
+                             override.aes = list(size = 0.05))) +
+  stat_compare_means(
+                     comparisons = comparisons,
+                     method = "t.test",
+                     aes(label = after_stat(p.signif))
+                     ) +
+  ylab("Gene Expression") +
+  xlab("") + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+
+#Save pre treatment ki67 plot
+
+ggsave(filename = paste0(dir1, "_TFcandidatesResistanceRegulonsExpression",
+                         "_HNF4G_ZNF100_Pre.Post_Tx.ki67_ggplot.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       path = paste0(dir, dir1, "/figures"), width = 6, height = 2)
+}
+
+
+#CALCULATE SMARCD3 RESISTANCE REGULON SIGNATURE IN SABINE ET AL DATA
+
+express <- b.data %>% 
+  select(Gene, Patient_v3, Expression) %>% 
+  pivot_wider(names_from = "Patient_v3", values_from = "Expression") %>% 
+  column_to_rownames(var = "Gene") %>% 
+  as.matrix()
+
+#Read in smarcd3 signature
+setwd(paste0(dir, dir2, "preTx2/"))
+#list.files()
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers",
+                            #"_SMARCD3_ResistantRegulon_candidates_v5.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v5.1.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v6.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v6.1.txt"), 
+                            "_SMARCD3_ResistantRegulon_candidates_v7.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v7.1.txt"), 
+              sep = "\t", header = T, quote = "") %>% 
+  select(SMARCD3) %>% 
+#  #rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+preT
+
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_leading",
+                            #"_edge_TOP_ResistantRegulon_candidates_v5.txt"), #no 
+                            #"_edge_TOP_ResistantRegulon_candidates_v6.txt"), 
+                            "_edge_TOP_ResistantRegulon_candidates_v7.txt"),
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+
+preT
+
+names <- preT %>% 
+  names()
+
+preTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- preT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  preTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+
+preTx
+
+
+#postTx
+
+#Read in smarcd3 signature
+setwd(paste0(dir, dir2, "postTx2/"))
+#list.files()
+
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_AllRegulonMembers",
+                            #"_SMARCD3_ResistantRegulon_candidates_v5.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v5.1.txt"),
+                            #"_SMARCD3_ResistantRegulon_candidates_v6.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v6.1.txt"),
+                            "_SMARCD3_ResistantRegulon_candidates_v7.txt"), 
+                            #"_SMARCD3_ResistantRegulon_candidates_v7.1.txt"), 
+              sep = "\t", header = T, quote = "") %>% 
+  select(SMARCD3) %>% 
+  #rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+
+postT
+
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_leading",
+                             #"_edge_TOP_ResistantRegulon_candidates_v5.txt"),
+                             #"_edge_TOP_ResistantRegulon_candidates_v6.txt"),
+                             "_edge_TOP_ResistantRegulon_candidates_v7.txt"),
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+
+postT
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- postT %>% 
+  names()
+
+postTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- postT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  postTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+
+postTx
+
+#Put  regulons into list for pre and post treatment for enrichment analysis
+pathways_mr <- list(c(preTx, postTx))
+
+names(pathways_mr) <- "SMARCD3"
+
+collection <- names(pathways_mr)
+
+#Run ssGSEA's emperical cumulative distribution function to calculate scores
+#i <- collection[1]
+system.time(
+
+gsva_mr <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  pathways <- pathways_mr[[i]]
+  
+  #Run ssgsea
+  gsva(expr = express, gset.idx.list =  pathways,
+                method="ssgsea",  min.sz = 15, max.sz = 500, verbose=TRUE, 
+                kcdf="Gaussian", parallel.sz=1L, mx.diff = T,
+                tau = 0.25, ssgsea.norm = T)
+}
+)
+
+#join scores to metadata
+
+#convert to long format
+meta <- b.data %>% 
+  select(-c(Gene, Expression)) %>% 
+  unique()
+
+#join metadata
+keep.gs <- rownames(gsva_mr)
+
+b.data1 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set") %>% 
+  pivot_longer(!Gene_Set, names_to = "Patient_v3", 
+               values_to = "EnrichmentScore") %>% 
+  left_join(meta, by = "Patient_v3") %>% 
+  mutate(Gene_Set2 = ordered(Gene_Set, levels = keep.gs),
+         pAKT_response2 = ordered(pAKT_response, 
+                                  levels = c("Responder_pAKT", 
+                                             "NonResponder_pAKT")),
+         ki67_response2 = ordered(ki67_response, 
+                                  levels = c("Responder_Ki67", 
+                                             "NonResponder_Ki67")),
+         Treatment2 = ordered(Treatment, levels = c("NoTx", "Everolimus")),
+         Tx_TimePoint2 = ifelse(Tx_TimePoint == "Pre", "Pre.Treatment_Sample",
+                                "Post.Treatment_Sample"),
+         Tx_TimePoint2 = ordered(Tx_TimePoint2, 
+                                 levels = c("Pre.Treatment_Sample",
+                                            "Post.Treatment_Sample"))) %>% 
+  unite(Tx.TimePoint_pAKT, c("Tx_TimePoint", "pAKT_response2"), 
+        sep = "_", remove = F) %>%
+  unite(Tx.TimePoint_ki67, c("Tx_TimePoint", "ki67_response2"), 
+        sep = "_", remove = F) %>%
+  mutate(Tx.TimePoint_pAKT = ordered(Tx.TimePoint_pAKT, 
+                                     levels = c("Pre_Responder_pAKT",
+                                                "Pre_NonResponder_pAKT",
+                                                "Post_Responder_pAKT",
+                                                "Post_NonResponder_pAKT")),
+         Tx.TimePoint_ki67 = ordered(Tx.TimePoint_ki67, 
+                                     levels = c("Pre_Responder_Ki67",
+                                                "Pre_NonResponder_Ki67",
+                                                "Post_Responder_Ki67",
+                                                "Post_NonResponder_Ki67"))) %>%
+  mutate_at(vars(Patient, Patient_v2, Patient_v3, batch, tissue), as.factor)
+
+
+.f = function() {
+#Run after reading in this file (read in at bottom of scripts)
+## Reading it in saves time from running the entire script (useful for plotting)
+b.data1 <- b.data1 %>% 
+  mutate(Gene_Set2 = ordered(Gene_Set2, 
+                             levels = c("SMARCD3_preTxRegulonSignature",
+                                        "SMARCD3_postTxRegulonSignature")),
+         Tx.TimePoint_pAKT = ordered(Tx.TimePoint_pAKT, 
+                                     levels = c("Pre_Responder_pAKT",
+                                                "Pre_NonResponder_pAKT",
+                                                "Post_Responder_pAKT",
+                                                "Post_NonResponder_pAKT")),
+         Tx.TimePoint_ki67 = ordered(Tx.TimePoint_ki67, 
+                                     levels = c("Pre_Responder_Ki67",
+                                                "Pre_NonResponder_Ki67",
+                                                "Post_Responder_Ki67",
+                                                "Post_NonResponder_Ki67")))
+}
+
+#Perform t test
+
+# pAKT comparison
+
+b.data1 %>% 
+  group_by(Tx.TimePoint_pAKT) %>% 
+  summarise(m = mean(EnrichmentScore),
+            med = median(EnrichmentScore),
+            v = var(EnrichmentScore),
+            iqr = IQR(EnrichmentScore))
+
+state.ref <- "Pre_Responder_pAKT"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- b.data1[,1:20] %>%
+  mutate(Tx.TimePoint_pAKT_v2 = as.character(Tx.TimePoint_pAKT)) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$pAKT_response <- relevel(as.factor(gsva.data$pAKT_response), ref = state.ref2)
+gsva.data$Tx.TimePoint_pAKT_v2 <- relevel(as.factor(gsva.data$Tx.TimePoint_pAKT_v2), ref = state.ref)
+
+str(gsva.data)
+levels(gsva.data$Tx.TimePoint_pAKT_v2)
+rows <- nrow(gsva.data)
+
+#Check for homoscedasticity (equal variance)
+tmp <- gsva.data %>%
+    filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>% 
+  filter(Tx.TimePoint_pAKT_v2 %in% c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_pAKT_v2, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_pAKT_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>%
+  filter(Tx.TimePoint_pAKT_v2 %in% c("Post_Responder_pAKT", "Post_NonResponder_pAKT")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_pAKT_v2, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+gsva.data %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_pAKT_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+#Check for homoscedasticity (equal variance)
+tmp <- gsva.data %>%
+    filter(Gene_Set == "SMARCD3_postTxRegulonSignature") %>% 
+  filter(Tx.TimePoint_pAKT_v2 %in% c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_pAKT_v2, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_pAKT_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_postTxRegulonSignature") %>% 
+  filter(Tx.TimePoint_pAKT_v2 %in% c("Post_Responder_pAKT", "Post_NonResponder_pAKT")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_pAKT_v2, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_pAKT_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+#Tests show equal variance and normality
+
+
+# t test
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+
+start <- Sys.time()
+
+stat.test <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  
+  gsva.2.3 %>% 
+    group_by(Gene_Set) %>% 
+    t_test(formula = EnrichmentScore ~ Tx.TimePoint_pAKT_v2, 
+                p.adjust.method = "BH", var.equal = T,
+                comparisons = list(c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT"),
+                          c("Post_NonResponder_pAKT", "Post_Responder_pAKT"))) %>% 
+    add_significance() %>% 
+    add_xy_position(x = "Tx.TimePoint_pAKT", scales = "free", step.increase = 0.2) %>% 
+    arrange(Gene_Set) %>% 
+    ungroup()
+  
+  
+}
+end <- Sys.time()
+print(lme.pre <- end-start)
+
+#Time difference of 5.325666 secs
+stat.test1 <- stat.test %>% 
+  mutate(Gene_Set = factor(Gene_Set, levels= c("SMARCD3_preTxRegulonSignature",
+                                        "SMARCD3_postTxRegulonSignature")))
+stat.test1
+
+
+#plot
+
+#txtime.all <- c("Pre", "Post")
+#txtime <- txtime.all[1]
+#keep <- keep.gs[2]
+
+comparisons <- list(c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT"),
+                    c("Post_Responder_pAKT", "Post_NonResponder_pAKT"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_pAKT", "Pre_NonResponder_pAKT",
+                    "Post_Responder_pAKT", "Post_NonResponder_pAKT")
+
+#plot pAKT samples
+pAKT.sig <- b.data1 %>% 
+  #filter(Gene_Set %in% keep,
+  #       Tx_TimePoint == txtime) %>%
+  mutate(Gene_Set = factor(Gene_Set, levels= c("SMARCD3_preTxRegulonSignature",
+                                        "SMARCD3_postTxRegulonSignature"))) %>% 
+  ggplot(mapping = aes(x = Tx.TimePoint_pAKT, y = EnrichmentScore)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_pAKT),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_pAKT),
+               alpha = 0.2, width = 0.3, color = "grey") +
+  geom_point(size = 0.05) +
+  theme_classic() +
+  #theme_bw() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 9, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 10, face = "bold"),
+        strip.text.x = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        legend.title = element_text(size = 10, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.5, "cm"),
+        legend.key.size = unit(1, "lines")) +
+  facet_wrap(~Gene_Set, scales = "free", ncol = 2) +
+  #facet_grid(Tx_TimePoint2 ~ Gene_Set, scales = "free") +
+  guides(fill = guide_legend(title = paste0("pAKT patient classification"),
+                             override.aes = list(size = 0.05))) +
+  stat_pvalue_manual(stat.test1, 
+                     #label = "p.signif", 
+                     label = "p = {p}", 
+                     size = 4,
+                     tip.length = 0.01, bracket.size = .2, step.increase = 0,
+                     hide.ns = F) +
+  #stat_compare_means(
+  #                   comparisons = comparisons,
+  #                   method = "t.test",
+  #                   method.args = list(var.equal = F), #Welch's t test
+  #                   label = "p.format"
+  #                   #aes(label = after_stat(p.signif))
+  #                   ) +
+  ylab("ssGSEA score") +
+  xlab("") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+pAKT.sig
+
+
+#Ki67 compparison
+
+#Perform t test
+
+b.data1 %>% 
+  group_by(Tx.TimePoint_ki67) %>% 
+  summarise(m = mean(EnrichmentScore),
+            med = median(EnrichmentScore),
+            v = var(EnrichmentScore),
+            iqr = IQR(EnrichmentScore))
+
+
+
+# PRE-treatment comparison : Sensitive and DMSO as references
+class <- "Tx.TimePoint_ki67"
+state.ref <- "Pre_Responder_Ki67"
+refs <- paste(state.ref, treatment.ref, sep = ".")
+
+gsva.data <- b.data1[,1:20] %>%
+  mutate(Tx.TimePoint_ki67_v2 = as.character(Tx.TimePoint_ki67)) %>% 
+  droplevels()
+
+#Relevel references for model
+gsva.data$Tx.TimePoint_ki67_v2 <- relevel(as.factor(gsva.data$Tx.TimePoint_ki67_v2), ref = state.ref)
+
+str(gsva.data)
+levels(gsva.data$Tx.TimePoint_ki67_v2)
+rows <- nrow(gsva.data)
+
+
+#Check for homoscedasticity (equal variance)
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>% 
+  filter(Tx.TimePoint_ki67 %in% c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_ki67, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_ki67)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>%
+  filter(Tx.TimePoint_ki67 %in% c("Post_Responder_Ki67", "Post_NonResponder_Ki67")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_ki67, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_ki67_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+#Check for homoscedasticity (equal variance)
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_postTxRegulonSignature") %>% 
+  filter(Tx.TimePoint_ki67 %in% c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_ki67, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_ki67)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+tmp <- gsva.data %>% 
+  filter(Gene_Set == "SMARCD3_postTxRegulonSignature") %>%
+  filter(Tx.TimePoint_ki67 %in% c("Post_Responder_Ki67", "Post_NonResponder_Ki67")) 
+var.test(formula = EnrichmentScore ~ Tx.TimePoint_ki67, data = tmp) 
+#plot density
+tmp %>% 
+  ggplot(mapping = aes(y = EnrichmentScore)) + 
+  geom_density()
+
+#Check normality
+tmp %>% 
+  shapiro_test(EnrichmentScore)
+#qq plot
+tmp %>% 
+  ggplot(mapping = aes(sample = EnrichmentScore, color = Tx.TimePoint_ki67_v2)) + 
+  geom_qq() +
+  geom_qq_line()
+
+
+#Tests show equal variance and normality
+
+# Run T TEST
+names <- gsva.data %>% 
+  pull(Gene_Set) %>% 
+  as.character() %>% 
+  unique()
+
+#Run model
+
+start <- Sys.time()
+
+stat.test <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  gsva.2.3 <- gsva.data %>%
+    filter(Gene_Set == i)
+  
+  gsva.2.3 %>% 
+    group_by(Gene_Set) %>% 
+    t_test(formula = EnrichmentScore ~ Tx.TimePoint_ki67_v2, 
+                p.adjust.method = "BH", var.equal = T,
+                comparison = list(c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67"),
+                                   c("Post_Responder_Ki67", "Post_NonResponder_Ki67"))) %>% 
+    add_significance() %>% 
+    add_xy_position(x = "Tx.TimePoint_ki67", scales = "free", step.increase = 0.2) %>% 
+    arrange(Gene_Set) %>% 
+    ungroup()
+  
+  
+}
+end <- Sys.time()
+print(lme.pre <- end-start)
+
+#Time difference of 5.325666 secs
+stat.test2 <- stat.test %>% 
+  mutate(Gene_Set = factor(Gene_Set, levels= c("SMARCD3_preTxRegulonSignature",
+                                        "SMARCD3_postTxRegulonSignature")))
+stat.test2
+
+
+
+#plot ki67
+comparisons <- list(c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67"),
+                    c("Post_Responder_Ki67", "Post_NonResponder_Ki67"))
+mycolors <- c("dodgerblue", "deeppink4", "cyan3", "hotpink3")
+names(mycolors) <- c("Pre_Responder_Ki67", "Pre_NonResponder_Ki67",
+                    "Post_Responder_Ki67", "Post_NonResponder_Ki67")
+
+ki67.sig <- b.data1 %>% 
+  #filter(Gene_Set %in% keep,
+  #       Tx_TimePoint == txtime) %>%
+  mutate(Gene_Set = factor(Gene_Set, levels= c("SMARCD3_preTxRegulonSignature",
+                                        "SMARCD3_postTxRegulonSignature"))) %>% 
+  ggplot(mapping = aes(x = Tx.TimePoint_ki67, y = EnrichmentScore)) +
+  geom_violin(mapping = aes(fill = Tx.TimePoint_ki67),
+              width = 0.5, alpha = .8) +
+  geom_boxplot(mapping = aes(fill = Tx.TimePoint_ki67),
+               alpha = 0.2, width = 0.3, color = "grey") +
+  geom_point(size = 0.05) +
+  theme_classic() +
+  #theme_bw() +
+  scale_fill_manual(values = mycolors) +
+  theme(
+        axis.text.y = element_text(size = 9, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.title.y.left = element_text(size = 10, face = "bold"),
+        strip.text.x = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        legend.title = element_text(size = 10, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.5, "cm"),
+        legend.key.size = unit(1, "lines")
+        ) +
+  facet_wrap(~Gene_Set, scales = "free", ncol = 4) +
+  #facet_grid(Tx_TimePoint2 ~ Gene_Set, scales = "free") +
+  guides(fill = guide_legend(title = "KI67 patient classification",
+                             override.aes = list(size = 0.05))) +
+  stat_pvalue_manual(stat.test2, 
+                     #label = "p.signif", 
+                     label = "p = {p}", 
+                     size = 4,
+                     tip.length = 0.01, bracket.size = .2, step.increase = 0,
+                     hide.ns = F) +
+  #stat_compare_means(
+  #                   comparisons = comparisons,
+  #                   method = "t.test",
+  #                   method.args = list(var.equal = F), #Welch's t test
+  #                   label = "p.format"
+  #                   #aes(label = after_stat(p.signif))
+  #                   ) +
+  ylab("ssGSEA score") +
+  xlab("") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2))
+ki67.sig
+
+
+
+#SAVE OBJECTS, PLOTS AND FILES
+.f = function() {
+
+setwd(paste0(dir, dir1))
+
+#Save expression set object
+saveRDS(eset, file = paste0(dir1, "_ExpressionSetObject.rds"))
+#eset <- readRDS(file = paste0(data.prefix, "ExpressionSetObject.rds"))
+
+#Save illumina expression set object
+saveRDS(summaryData, file = paste0(dir1, "_ExpressionSetIllumina.rds"))
+#summaryData <- readRDS(file = paste0(data.prefix, "ExpressionSetIllumina.rds"))
+
+#Save normalized illumina expression set object
+saveRDS(summaryData1, file = paste0(dir1, "_ExpressionSetIllumina_normalized.rds"))
+#summaryData1 <- readRDS(file = paste0(dir1, "_ExpressionSetIllumina_normalized.rds"))
+
+#Save patient metadata
+fwrite(pData, file = paste0(dir1, "_PatientMetadata.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#read in metadata
+pData <- fread(file = paste0(dir1, "_PatientMetadata.txt"),
+       sep = "\t", header = T, quote = "") 
+
+#Save quantile normalized/log2Transformed/combat batch corrected 
+## micro array data
+tmp <- combat_edata %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene")
+
+fwrite(tmp, file = paste0(dir1, "_QuantileNormalizedCombatCorrected", 
+                          "MicroArrayExpressionData.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+combat_edata <- fread(file = paste0(dir1, "_QuantileNormalizedCombatCorrected", 
+                          "MicroArrayExpressionData.txt"),
+       sep = "\t", header = T, quote = "") %>% 
+  column_to_rownames(var = "Gene")
+  
+#Save data in long format
+fwrite(b.data, file = paste0(dir1, "_QuantileNormalizedCombatCorrected", 
+                          "MicroArrayExpressionDataLongFormat.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Read in  
+b.data <- fread(file = paste0(dir1, "_QuantileNormalizedCombatCorrected", 
+                          "MicroArrayExpressionDataLongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+
+#Save enrichment scores
+#Save data in long format
+fwrite(b.data1, file = paste0(dir1, "_SMARCD3_ssGSEA.scores_LongFormat.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+b.data1 <- fread(file = paste0(dir1, "_SMARCD3_ssGSEA.scores_LongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+  
+#Save SAM reslutls for pAKT.pre
+fwrite(samout.pakt.pre, file = paste0(dir1, "_SAM_preTxSamples",
+                             "paktResponse_TFcandidatesResistanceRegulons.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+##Save SAM results for Ki67.pre
+fwrite(samout.ki67.pre, file = paste0(dir1, "_SAM_preTxSamples",
+                             "ki67Response_TFcandidatesResistanceRegulons.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+##Save SAM results for pAKT.post
+fwrite(samout.pakt.post, file = paste0(dir1, "_SAM_postTxSamples",
+                             "paktResponse_TFcandidatesResistanceRegulons.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+##Save SAM reslutls for Ki67.post
+fwrite(samout.ki67.post, file = paste0(dir1, "_SAM_postTxSamples",
+                             "ki67Response_TFcandidatesResistanceRegulons.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save SAM results as list in excel file
+sam.list <- list(KI67_class.pre = samout.ki67.pre,
+                 KI67_class.post = samout.ki67.post,
+                 pAKT_class.pre = samout.pakt.pre,
+                 pAKT_class.post = samout.pakt.post)
+
+openxlsx::write.xlsx(sam.list, file = paste0(dir1, "_pAKT__KI67_classified", 
+                                        "_samples_SAM_results_table.xlsx"))
+
+#Save pre treatment pAKT plot
+pre.post.pAKT
+ggsave(filename = paste0(dir1, "_TFcandidatesResistanceRegulonsExpression",
+                         "_SMARCD3_Pre.Post_Tx.pAKT_ggplot.tiff"),
+                         #"_PPARA_PreTx.pAKT_ggplot.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       #path = paste0(dir, dir1, "/figures"), width = 9, height = 4)
+       path = paste0(dir, dir1, "/figures"), width = 4, height = 2) #Single image
+
+#Save pre treatment ki67 plot
+pre.post.ki67
+ggsave(filename = paste0(dir1, "_TFcandidatesResistanceRegulonsExpression",
+                         "_SMARCD3_Pre.Post_Tx.ki67_ggplot.tiff"),
+                         #"_PPARA_PreTx.ki67_ggplot.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       #path = paste0(dir, dir1, "/figures"), width = 9, height = 4)
+       path = paste0(dir, dir1, "/figures"), width = 4, height = 2)  #Single image
+
+
+#Save signature plots for pAKT samples
+pAKT.sig
+ggsave(filename = paste0("SMAARCD3.ResistanceRegulonSignatures_ssGSEAscores",
+                         #"_sabineData_pAKT_response_v5.tiff"),
+                         #"_sabineData_pAKT_response_v5lv.tiff"),
+                         #"_sabineData_pAKT_response_v5LE.tiff"),
+                         "_sabineData_pAKT_response_v5LElv.tiff"),
+                         #"_sabineData_pAKT_response_v5.1.tiff"),
+                         #"_sabineData_pAKT_response_v6.tiff"),
+                         #"_sabineData_pAKT_response_v6lv.tiff"),
+                         #"_sabineData_pAKT_response_v6LElv.tiff"),
+                         #"_sabineData_pAKT_response_v6LE.tiff"),
+                         #"_sabineData_pAKT_response_v6.1.tiff"),
+                         #"_sabineData_pAKT_response_v7.tiff"),
+                         #"_sabineData_pAKT_response_v7lv.tiff"),
+                         #"_sabineData_pAKT_response_v7LElv.tiff"),
+                         #"_sabineData_pAKT_response_v7LE.tiff"),
+                         #"_sabineData_pAKT_response_v7.1.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       path = paste0(dir, dir1, "/figures"), width = 8, height = 2)
+
+#Save signature plots for Ki67 samples
+ki67.sig
+ggsave(filename = paste0("SMAARCD3.ResistanceRegulonSignatures_ssGSEAscores",
+                         #"_sabineData_Ki67_response_v5.tiff"),
+                         #"_sabineData_Ki67_response_v5LE.tiff"),
+                         #"_sabineData_Ki67_response_v5lv.tiff"),
+                         "_sabineData_Ki67_response_v5LElv.tiff"),
+                         #"_sabineData_Ki67_response_v5.1.tiff"),
+                         #"_sabineData_Ki67_response_v6.tiff"),
+                         #"_sabineData_Ki67_response_v6lv.tiff"),
+                         #"_sabineData_Ki67_response_v6LElv.tiff"),
+                         #"_sabineData_Ki67_response_v6LE.tiff"),
+                         #"_sabineData_Ki67_response_v6.1.tiff"),
+                         #"_sabineData_Ki67_response_v7.tiff"),
+                         #"_sabineData_Ki67_response_v7lv.tiff"),
+                         #"_sabineData_Ki67_response_v7LElv.tiff"),
+                         #"_sabineData_Ki67_response_v7LE.tiff"),
+                         #"_sabineData_Ki67_response_v7.1.tiff"),
+       device = "tiff", units = "in", dpi = 300, create.dir = T,
+       path = paste0(dir, dir1, "/figures"), width = 8, height = 2)
+
+}   
+```

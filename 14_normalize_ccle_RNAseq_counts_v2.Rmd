@@ -1,0 +1,699 @@
+---
+title: "normalize ccle counts"
+author: "Eric Medina"
+date: "2024-03-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#Load libraries
+library(edgeR)
+library(patchwork)
+library(plyr)
+library(ggplot2)
+library(data.table)
+library(foreach)
+library(conflicted)
+library(annotables)
+library(RColorBrewer)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+cellSamples1 <- "ccle_v2_2015_data"
+cellSamples2 <- "ctrp_v2_2015_data"
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "pharmacogenomicsDataSets/ccle_data/"
+dir2 <- "ccle_ctrp_v2_2015_data/"
+```
+
+```{r}
+#SET SEED
+set.seed(05222025)
+
+start.all <- Sys.time()
+#IMPORT CCLE COUNTS and normalize
+
+#Read in counts
+#Dataset downloaded from https://depmap.org/portal/data_page/?tab=allData
+setwd(dir = paste0(dir, dir1, dir2, "counts"))
+#list.files()
+counts.df <- fread(file = paste0("CCLE_RNAseq_genes_counts_20180929.gct"),
+                sep = "\t", header = T, quote = F)
+dim(counts.df)
+head(counts.df)[,1:5]
+
+#Remove ens gene names
+counts <- counts.df %>% 
+  as.data.frame() %>% 
+  select(-c(Name)) %>% 
+  rename("Gene_Symbol" = "Description")
+dim(counts)
+head(counts)[,1:5]
+
+#Filter gene symbols in counts to match protein coding genes in grch37
+
+#Get gene symbols
+g <- counts %>%
+  as.data.frame() %>%
+  select(Gene_Symbol)
+dim(g)
+head(g)
+
+#Look at known genes from grch37
+head(grch37)
+
+#Get known gene symbols from grch37
+annot <- grch37 %>%
+  as.data.frame() %>%
+  dplyr::rename("ENTREZID" = "entrez",
+                "EN_G" = "ensgene",
+                "Gene_Symbol" = "symbol")
+dim(annot)
+head(annot)
+
+#Match gene symbols from grch37 to gene symbols in counts
+
+#Get protein coding genes
+annot2 <- annot %>% 
+  filter(Gene_Symbol %in% g$Gene_Symbol,
+         biotype == "protein_coding" )
+dim(annot2)
+head(annot2, 10)
+
+#Remove NAs 
+sum(is.na(annot2))
+annot3 <- na.omit(annot2)
+sum(is.na(annot3))
+dim(annot3)
+
+annot3 <- annot3 %>% 
+  arrange(Gene_Symbol)
+
+dim(counts)
+sum(is.na(counts))
+head(counts)[,1:5]
+
+#Match gene symbols 
+counts2.2 <- counts %>%
+  filter(Gene_Symbol %in% annot3$Gene_Symbol)
+head(counts2.2)[,1:5]
+dim(counts2.2)
+
+annot3.2 <- annot3[match(counts2.2$Gene_Symbol, annot3$Gene_Symbol),]
+dim(annot3.2)
+
+if (all(annot3.2$Gene_Symbol == counts2.2$Gene_Symbol)) {
+  print("gene symbols match, saving counts matched to protein coding genes")
+  
+  setwd(dir = paste0(dir, dir1, dir2, "counts"))
+  write.table(counts2.2, file = paste0(cellSamples1, "_raw_RNA.seq_", 
+                                    "ProteinCodingGenes_counts.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+  
+  write.table(annot3.2, file = paste0(cellSamples1, "_ProteinCodingGenes_info.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+}
+
+
+#Read in cell annotations
+###Dataset downloaded from https://depmap.org/portal/data_page/?tab=allData
+
+setwd(dir = paste0(dir, dir1, dir2, "cellLineAnnotations"))
+#list.files()
+cell.annots <- fread(file = "Cell_lines_annotations_20181226.txt")
+
+#Select columns of interest and rename
+add_names <- cell.annots %>% 
+  filter(CCLE_ID %in% colnames(counts2.2)) %>% 
+  select(Annotation_Source, CCLE_ID, Name, Pathology, Site_Primary, Histology, 
+         type_refined, Hist_Subtype1, Gender, Age, Race, inferred_ethnicity, 
+         Site_Of_Finding, Disease, PATHOLOGIST_ANNOTATION, mutRate) %>% 
+  rename("DATASET" = "Annotation_Source",
+         "CellLine" = "CCLE_ID",
+         "CellLine2" = "Name",
+         "tissueID" = "Site_Primary",
+         "CellLine.Type" = "type_refined",
+         ) 
+
+#Match order of cell names in counts and annot data frames
+add_names <- add_names[match(colnames(counts2.2)[2:ncol(counts2.2)], add_names$CellLine),]
+head(add_names)
+dim(add_names)
+
+#Which genes are duplicated and have zero counts in all samples
+tmp.zero <- counts2.2 %>% 
+  select(-Gene_Symbol) %>% 
+  as.matrix()
+dim(tmp.zero)
+tmp.zero.ind <- which(rowSums(tmp.zero, dims = 1) == 0 )
+length(tmp.zero.ind)
+#59 genes with zero counts across all samples
+
+rm(tmp.zero)
+
+#remove these from counts: use the indexes that match rownames
+dim(counts2.2)
+counts2.2 <- counts2.2 %>% 
+  filter(!rownames(.) %in% tmp.zero.ind)
+dim(counts2.2)
+
+#Which genes are duplicated?
+tmp.dup <- counts2.2 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarize(count = n()) %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol)
+#15 genes are duplicated
+
+tmp2 <- counts2.2 %>% 
+  filter(Gene_Symbol %in% tmp.dup) %>% 
+  arrange(Gene_Symbol)
+
+head(tmp2, 30)[,1:5]
+
+#Look at these genes in grch37 gene info 
+tmp.dup.info <- grch37 %>% 
+  filter(symbol %in% tmp2$Gene_Symbol) %>% 
+  arrange(symbol)
+
+tmp.dup.info %>% 
+  as.data.frame()
+
+#rename second stance of gene with suffix "_v2"
+names <- tmp2 %>% 
+  pull(Gene_Symbol) %>% 
+  as.character() %>% 
+  unique()
+#i <- names[1]
+
+#For loop
+tmp.sum <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  tmp.1 <- tmp2 %>% 
+    filter(Gene_Symbol == i) %>% 
+    slice(1)
+  tmp.2 <- tmp2 %>% 
+    filter(Gene_Symbol == i) %>% 
+    slice(2) %>% 
+    mutate(Gene_Symbol = paste0(Gene_Symbol, "_v2"))
+  tmp.1 %>% 
+    full_join(tmp.2, by = colnames(.)) %>% 
+    as.data.frame()
+}
+
+head(tmp.sum)[,1:5]
+
+#Remove duplicated genes from counts and add summed genes
+counts2.3 <- counts2.2 %>% 
+  filter(!Gene_Symbol %in% tmp.dup) %>% 
+  full_join(tmp.sum, by = colnames(.))
+
+head(counts2.3)[,1:5]
+dim(counts2.3)
+
+#Move gene name column to row names
+counts2.3 <- counts2.3 %>% 
+  column_to_rownames(var = "Gene_Symbol")
+head(counts2.3)[,1:5]
+
+#Get first instance of gene symbol that are duplicated in annot data frame
+names <- annot3.2 %>% 
+  select(Gene_Symbol) %>% 
+  #filter(Gene_Symbol %in% tmp.dup)
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character() %>% 
+  unique()
+
+tmp.g <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+  tmp.1 <- annot3.2 %>% 
+    filter(Gene_Symbol == i) %>% 
+    slice(1)
+  tmp.2 <- annot3.2 %>% 
+    filter(Gene_Symbol == i) %>% 
+    slice(2) %>% 
+    mutate(Gene_Symbol = paste0(Gene_Symbol, "_v2"))
+  tmp.1 %>% 
+    full_join(tmp.2, by = colnames(.)) %>% 
+    as.data.frame()
+}
+tmp.g
+
+#Remove dup genes from annot and add first instance of gene and filter
+## for genes in counts
+annot3.3 <- annot3.2 %>% 
+  filter(!Gene_Symbol %in% tmp.dup) %>% 
+  full_join(tmp.g, by = colnames(.)) 
+
+#Annot3.3 has 20 duplicated genes that only have one instance in counts
+#Remove second instance of these genes
+#Get first instance of gene symbol that are duplicated in annot data frame
+names <- annot3.3 %>% 
+  select(Gene_Symbol) %>% 
+  #filter(Gene_Symbol %in% tmp.dup)
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character() %>% 
+  unique()
+
+#For loop to remove second instance
+tmp.g <- foreach(i = names, .combine = "rbind") %do% {
+  print(i)
+  
+  annot3.3 %>% 
+    filter(Gene_Symbol == i) %>% 
+    slice(1)
+}
+tmp.g
+
+annot3.3 <- annot3.3 %>% 
+  filter(!Gene_Symbol %in% names) %>% 
+  full_join(tmp.g) %>% 
+  filter(Gene_Symbol %in% rownames(counts2.3))
+
+annot3.3 <- annot3.3[match(rownames(counts2.3), annot3.3$Gene_Symbol),]
+#USE EDGER TO NORMALIZE AND FILTER COUNTS
+
+
+#Determine group size for each sample
+
+# USE EDGER TO NORMALIZE AND FILTER COUNTS
+#DETERMINE GROUP SIZE FOR EACH SAMPLE
+#rep(x, each = 3), x is number-range of cols (samples) in counts 
+# divided by 3 (triplicates) 
+#(e.g., col=36 (here, 12 samples in triplicates), 36/3=12; rep(1:12))
+
+#Create edgeR object
+if (all(annot3.3$Gene_Symbol == rownames(counts2.3))) {
+  
+  #y <- DGEList(counts = counts2.3, group = rep(1:ncol(counts2.3), each = 1), 
+  y <- DGEList(counts = counts2.3, group = rep(1:1, each = ncol(counts2.3)), 
+             genes = annot3.3)
+}
+
+if (all(add_names$CellLine == rownames(y$samples)) == "TRUE") {
+  
+  print("sample names match, proceed to insert additional variables")
+  #Insert varibles in object
+  y$samples$lib.size <- colSums(y$counts)
+  
+  y$samples <- y$samples %>% 
+    add_column(CellLine = rownames(.)) %>% 
+    left_join(add_names, by = "CellLine")
+  } else  {
+    
+    print("sample names do not match")
+    stop()
+}
+
+
+#For graphs: Use logCPM for exploratory plots.
+##calculate mean and median cpm cutoffs
+# Any two read counts with same CPM values will also have same logCPM values.
+## Prior count avoids taking log of zero, and reduces spurious variability
+## for genes with low counts -> shrinks all inter-sample logFC-changes towards
+## zero.
+#Convert to log2-CPM. log = T will add offset to CPM values before converting
+## to log2-scale. Offset is 2/L; 2 = prior counts, L = average lib size in mill.
+## logCPM values related to CPM values by log2(CPM + 2/L). 
+
+L <- mean(y$samples$lib.size) * 1e-6 #average lib size in millions
+M <- median(y$samples$lib.size) * 1e-6
+c(L, M)
+#Minimum number of genes kept in filtering = 10 in minimum number of samples
+## (minimum number of samples based on grouping factor)
+lcpm.cutoff <- log2(10/M + 2/L) 
+nsamples <- ncol(y)
+
+#expand color palette
+col <- colorRampPalette(brewer.pal(9, "Set1"))
+
+#Look at Unfiltered logCPM
+## counts are log2(cpm + 2L) normalized
+lcpm.unfilt <- cpm(y, log = T)
+#added to cpm before log2: 2^logcpm - cpm = d; d + cpm = log2(cpm)
+cpm.unfilt <- cpm(y, log = F)
+counts.unfilt <- y$counts
+
+dim(lcpm.unfilt)
+r.lcpm.unf <- nrow(lcpm.unfilt)
+
+#Extra QC plots of unfiltered data
+
+.f = function() {
+
+head(summary(lcpm.unfilt))[,1:5]
+
+setwd(dir = paste0(dir, dir1, dir2, "counts/unfiltered/figures/"))
+
+#Box plot
+tiff(file = paste(cellSamples1, "QC_logCPM_unfiltered_boxplot.tiff",
+                 sep = "_"), width = 10, height = 6, units = "in", res = 300)
+boxplot(lcpm.unfilt, col = col(nsamples))
+title(main="A. Raw data", xlab="Log-cpm")
+dev.off()
+
+#Density plot
+tiff(file = paste(cellSamples1, "QC_logCPM_unfiltered", 
+                       r.lcpm.unf, "distribution_test.tiff", sep = "_"),
+    width = 10, height = 6, units = "in", res = 300)
+
+plot(density(lcpm.unfilt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), 
+     las=2, main="", xlab="")
+title(main="Unfiltered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.unfilt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#snames <- rownames(y$samples)
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+.f = function() {
+pdf(file = paste(cellSamples1, "QC_unfiltered", r.lcpm.unf,
+                "gene_expression_MDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.unfilt, labels = y$samples$unique.tissueid,
+        cex = 0.7, 
+        dim.plot = c(1,2))
+title(main="Average (root-mean-square) of largest logFC changes", 
+      #xlab="Log-cpm"
+      )
+dev.off()
+}
+
+
+#Save unfiltered counts
+setwd(dir = paste0(dir, dir1, dir2, "counts/unfiltered/"))
+
+# Save logCPM unfiltered values
+tmp <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "log2CPM.unfiltered",
+                                      r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+  
+# Save CPM unfiltered values
+tmp <- cpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "CPM.unfiltered",
+                                     r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts unfiltered values
+tmp <- counts.unfilt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "Counts.unfiltered", 
+                         r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+
+
+#Get mean and variance relationship: use raw counts or CPM
+#summ <- counts.unfilt %>%
+summ <- cpm.unfilt %>%
+#summ <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "log2CPM") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(log2CPM),
+            sd = sd(log2CPM),
+            var = var(log2CPM))
+plot(x = log(summ$mean, base = 2), y = log(summ$var, base = 2))
+#plot(x = summ$mean, y = summ$var)
+
+
+#Set directory for unfiltered plots
+setwd(dir = paste0(dir, dir1, dir2, "counts/unfiltered/figures/"))
+
+#ggplot mean vs variance in log2
+tiff(file = paste(cellSamples1, "mean_vs_variance_counts_unfiltered.tiff", 
+                 sep = "_"), width = 6, height = 4, units = "in", res = 300)
+ggplot(summ, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+#ggplot(summ, mapping = aes(x = mean, y = var)) +
+  geom_point() +
+  #ylim(c(9.572694e-31,1.234371e+01)) +
+  #xlim(c(-3.419904, 13.456157)) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  theme_classic() +
+  labs(title = "Mean vs Variance unfiltered Counts")
+dev.off()
+
+
+} #End skip
+
+#FILER EDGER OBJECT FOR LOW EXPRESSED GENES
+
+##(e.g., median library size M = ~7 Million reads
+## 10/7 = ~1.43 - filterByExpr will keep genes with CPM
+## of 1.43 or more in at least 1 samples (no replicates here)).
+##Filter based on grouping factor of interest that will be tested. 
+## Here chose group as grouping factor
+dim(y)
+keep <- filterByExpr(y, group = y$samples$group)
+table(keep)
+y1 <- y[keep, , keep.lib.sizes = F]
+dim(y1)
+
+#TMM library normalization
+y1 <- calcNormFactors(y1, method = "TMM")
+
+#Look at filtered logCPM
+lcpm.filt <- cpm(y1, log = T)
+cpm.filt <- cpm(y1, log = F)
+counts.filt <- y1$counts
+
+
+#Make DF for summary statistics
+
+#Get mean and variance
+summ1 <- counts.filt %>%
+#summ1 <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "counts") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(counts),
+            sd = sd(counts),
+            var = var(counts))
+plot(x = log(summ1$mean, base = 2), y = log(summ1$var, base = 2))
+
+#Check var/mean relatioship
+setwd(dir = paste0(dir, dir1, dir2, "counts/filtered/figures/"))
+
+tiff(file = paste(cellSamples1, "mean_vs_variance_counts_filtered.tiff", 
+                 sep = "_"),
+     width = 6, height = 4, units = "in", res = 300)
+ggplot(summ1, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  labs(title = "Mean vs Variance filtered Counts") +
+  theme_classic()
+dev.off()
+
+.f = function() {
+q.g <- quantile(summ1$var, seq(0,1, 0.1))
+
+#Get genes with variance greater than 20% of distribution
+summ2 <- summ1 %>% 
+  filter(var >= q.g[3])
+}
+
+
+r.lcpm.filt <- nrow(lcpm.filt)
+r.lcpm.filt
+
+#Extra QC plots of filtered data
+
+.f = function() {
+
+
+head(summary(lcpm.filt))[,1:5]
+#boxplot(log2(counts.filt), col = col(nsamples))
+
+tiff(file = paste0(cellSamples1, "_QC_logCPM_filtered_boxplot.tiff"),
+      width = 6, height = 4, units = "in", res = 300)
+boxplot(lcpm.filt, col = col(nsamples))
+title(main="A. Filtered data", xlab="Log2CPM")
+dev.off()
+
+L <- mean(y1$samples$lib.size) * 1e-6 
+M <- median(y1$samples$lib.size) * 1e-6
+c(L, M)
+lcpm.cutoff <- log2(10/M + 2/L)
+
+#Plot filtered library
+tiff(file = paste(cellSamples1, "QC_filtered", r.lcpm.filt,
+                 "distribution.tiff", sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+plot(density(lcpm.filt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), las=2, 
+     main="", xlab="")
+title(main="Filtered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.filt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+
+.f = function() {
+#plot MDS
+pdf(file = paste(cellSamples1, "QC_filtered", r.lcpm.filt,
+                 "gMDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.filt, labels = y1$samples$tissue, 
+        cex = 0.7, 
+        dim.plot = c(1,2)
+        )
+title(main="Average (root-mean-square) of largest logFC changes"
+      #xlab="Log-cpm"
+      )
+dev.off()
+
+}
+
+#Plot library size
+tiff(file = paste(cellSamples1, "filtered_library_sizes.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+barplot(y1$samples$lib.size, 
+        names=y1$samples$group, 
+        ylab="Library size (Read depth)",
+        col = "grey", angle = 45)
+title("Normalize Library Size")
+abline(h=median(y1$samples$lib.size), col = "red")
+dev.off()
+
+#save filtered lib.size for integrated barplot
+t <- data.frame(y1$samples)
+
+tiff(file = paste(cellSamples1, "filtered_library_sizes_ggplot.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+ggplot(t, mapping = aes(x = group, y = lib.size, fill = tissueID)) + 
+  geom_col() + 
+  theme_classic() +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  geom_hline(aes(yintercept =  median(lib.size)), color = "red") +
+  #labs(title = paste0(unique(CellLine), " Normalized libary")) +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(size = 8, face = "bold", 
+                                          hjust = .9, vjust = .9)) +
+  theme(legend.position = "none") +
+  labs(title = paste0("normalized library"))
+dev.off()
+
+
+#SAVE metadata
+setwd(dir = paste0(dir, dir1, dir2, "/counts/filtered/"))
+
+#Library
+fwrite(t, file = paste(cellSamples1, "filtered_library_sizes.txt", 
+                            sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+
+#Save filtered counts
+setwd(dir = paste0(dir, dir1, dir2, "/counts/filtered/"))
+
+# Save logCPM filtered values
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "log2CPM.filtered",
+                                      r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+  
+# Save CPM filtered values
+tmp <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "CPM.filtered",
+                                     r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts filtered values
+tmp <- counts.filt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, "Counts.filtered", 
+                         r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+
+#MAKE DATAFAME in long format
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "CellLine", values_to = "log2CPM")
+
+tmp1 <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "CellLine", values_to = "CPM")
+
+tmp2 <- counts.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "CellLine", values_to = "counts")
+
+
+b.data <- tmp %>% 
+  left_join(tmp1, by = c("Gene_Symbol", "CellLine")) %>% 
+  left_join(tmp2, by = c("Gene_Symbol", "CellLine")) %>% 
+  left_join(add_names, by = "CellLine")
+head(b.data)
+dim(b.data)
+
+#SAVE DATAFRAME FOR STATISTICAL TESTING
+setwd(dir = paste0(dir, dir1, dir2, "counts/filtered/"))
+fwrite(b.data, file = paste(cellSamples1, "filtered", r.lcpm.filt, 
+                            "geneExpression_LongFormat.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+} #End
+
+
+end.all <- Sys.time()
+end.all-start.all
+#Time difference of 1.062313 mins
+```

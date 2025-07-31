@@ -1,0 +1,407 @@
+---
+title: "smarcd3 resistance regulon signature in sen/EverR"
+author: "Eric Medina"
+date: "2024-03-20"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+#LOAD LIBRARIES
+library(plyr)
+library(ggplot2)
+library(data.table)
+library(foreach)
+library(msigdbr)
+library(kableExtra)
+library(GSEABase)
+library(GSVA)
+library(conflicted)
+library(scales)
+library(openxlsx)
+library(drda)
+library(rstatix)
+library(ggpubr)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "viper/"
+dir2 <- "ssgsea/"
+```
+
+```{r}
+#GET SMARCD3 REGULON AND CALCULATE ssGSEA SCORE USING EVEROLIMUS SAMPLES
+set.seed(09102024)
+#Read in TF reguons pre and post treatment analyses
+
+#Read in normalized counts for cell lines
+setwd(dir = paste0(dir, "counts/filtered/"))
+#list.files()
+lcpm.filt <- fread(file = paste0("COH069_15929R_RNA_everSamples_logCPM_filtered",
+                                "_normalized_11680_genes.txt"), 
+                   sep = "\t", header = T, quote = "")
+
+#Pre-treatment signature
+setwd(dir = paste0(dir = dir, dir1, "/preTx2"))
+#list.files()
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers_",
+                            "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+preT
+
+#Post-treatment signature
+setwd(dir = paste0(dir = dir, dir1, "/postTx2"))
+#list.files()
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_AllRegulonMembers_",
+                            "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+postT
+
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- preT %>% 
+  names()
+
+preTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- preT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  preTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+preTx
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- postT %>% 
+  names()
+
+postTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- postT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  postTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+postTx
+
+#Put  regulons into list for pre and post treatment for enrichment analysis
+pathways_mr <- list(c(preTx, postTx))
+
+names(pathways_mr) <- "SMARCD3"
+
+collection <- names(pathways_mr)
+
+#Convert to matrix
+lcpm.filt <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  column_to_rownames(var = colnames(.)[1]) %>% 
+  as.matrix()
+
+
+#Run ssGSEA's emperical cumulative distribution function to calculate scores
+#i <- collection[1]
+system.time(
+
+gsva_mr <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  pathways <- pathways_mr[[i]]
+  
+  #Run ssgsea
+  gsva(expr = lcpm.filt, gset.idx.list =  pathways,
+                method="ssgsea",  min.sz = 15, max.sz = 500, verbose=TRUE, 
+                kcdf="Gaussian", parallel.sz=1L, mx.diff = T,
+                tau = 0.25, ssgsea.norm = T)
+}
+)
+#Elapsed tiem = 0.251 seconds
+
+#convert results to long format and add metadata
+gsva.data.all <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set") %>% 
+  pivot_longer(! Gene_Set, names_to = "Cell", 
+               values_to = "ssGSEA_Score") %>%
+  separate(Cell, into = c("cellLine", "state", "treatment", "rep", "num"),
+           remove = F, sep = "_") %>% 
+  mutate(num = ifelse(is.na(num), rep, num),
+         rep = ifelse(rep == num, treatment, rep),
+         treatment = ifelse(treatment == rep, state, treatment),
+         state = ifelse(state == treatment, "sen", state))  %>%
+  unite(S_T, c(state:treatment), remove = F, sep = "_") %>% 
+  mutate(cellLine2 = ifelse(cellLine == "CAMA1", "C",
+                            ifelse(cellLine == "MCF7", "M", "T"))) %>% 
+  unite(C_S_T, c(cellLine2, state, treatment), sep = "_", remove = F)  %>% 
+  unite(rep, c(rep, num), sep = "_", remove = T) %>% 
+  separate(Gene_Set, into = c("Gene_Set2", "txTimePoint"), sep = "_", 
+             remove = F) %>% 
+    #select(-junk) %>% 
+    select(Cell, Gene_Set, Gene_Set2, txTimePoint, ssGSEA_Score, cellLine, 
+           cellLine2, state, treatment, S_T, C_S_T, rep) %>% 
+    mutate_at(vars(Gene_Set, Gene_Set2, txTimePoint, cellLine, cellLine2, 
+                   state, treatment, S_T, C_S_T), factor) %>% 
+    mutate_at(vars(ssGSEA_Score), as.numeric)  
+
+head(gsva.data.all)
+str(gsva.data.all)
+table(gsva.data.all$Gene_Set)
+
+
+#Calculate AUC with drca package
+
+setwd(dir = paste0(dir, "dose_response"))
+#list.files()
+test <- fread(file = paste0("initialDoseResponse_cama1.mcf7.t47d_sen.everR", 
+                            "_01.04.2023_ForAUCs.txt"), 
+       sep = "\t", header = T, quote = "")
+test1 <- test %>% 
+  separate(CellLine, into = c("Cell", "State"), remove = F, sep = "_") 
+
+#Cell names
+cell.names <- test1 %>% 
+  pull(Cell) %>% 
+  unique() %>% 
+  as.character()
+
+#state names
+state.names <- test1 %>% 
+  pull(State) %>% 
+  unique() %>% 
+  as.character()
+
+auc.fit <- list()
+#j <- "CAMA1"
+#i <- "sen
+
+for (i in cell.names) {
+  print(i) 
+  
+  for (j in state.names) {
+    print(j)
+    tmp.test <- test1 %>% 
+      filter(Cell == i, 
+             State == j) 
+    fit <- drda(Viability ~ log(Dose, base = 10), data = tmp.test)
+    
+    auc.fit[[i]][[j]] <- nauc(fit, xlim = c(0,100))
+    
+  }
+  
+}
+
+auc.fit
+
+auc.fit[[i]] %>% 
+    enframe() %>% 
+    as.data.frame() %>% 
+    unnest(cols = everything()) %>% 
+    add_column(cellLine = i, .before = colnames(.)[1]) %>% 
+    rename("state" = "name",
+           "AUC" = "value") %>% 
+    as.data.frame()
+  
+#Place AUC into df
+auc.scaled <- list()
+
+for (i in cell.names) {
+  print(i)
+  auc.scaled[[i]] <- auc.fit[[i]] %>% 
+    enframe() %>% 
+    #as.data.frame() %>% 
+    unnest(cols = everything()) %>% 
+    add_column(cellLine = i, .before = colnames(.)[1]) %>% 
+    rename("state" = "name",
+           "AUC" = "value") %>% 
+    as.data.frame() %>% 
+    mutate(AUC.Scaled = AUC/100)
+}
+
+auc.scaled.df <- ldply(auc.scaled, .id = NULL)
+auc.scaled.df
+
+
+#Plots examples
+
+tx_keep <- c("DMSO", "ever")
+
+post.tx.names <- c("C_sen_ever", "C_everR_ever",
+                   "M_sen_ever", "M_everR_ever",
+                   "T_sen_ever", "T_everR_ever")
+
+#Keep enrichment score of baseline samples (DMSO) and AUC data of the same 
+## samples when treated with drug
+tmp <- gsva.data.all %>% 
+  as.data.frame() %>% 
+  mutate(Gene_Set = ordered(Gene_Set, 
+                            levels = c("SMARCD3_preTxRegulonSignature",
+                                       "SMARCD3_postTxRegulonSignature")),
+         C_S_T = ordered(C_S_T, levels = c(post.tx.names)),
+         state = ordered(state, levels = c("sen", "everR")),
+         state2 = state) %>%
+  mutate(state = ifelse(state == "everR", "EverR", "Sensitive")) %>% 
+  left_join(auc.scaled.df, by = c("cellLine", "state"), 
+            relationship = "many-to-many") %>% 
+  unite(C_S, c(cellLine, state), sep = "_", remove = F) %>% 
+  mutate(AUC.Scaled2 = AUC.Scaled) %>% 
+  mutate(AUC.Scaled2 = round(AUC.Scaled, digits = 3)) %>%
+  mutate(tx = ifelse(treatment == "DMSO", "DMSO", "Everolimus")) %>% 
+  unite(state_tx, c("state", "tx"), sep = "_", remove = F) %>% 
+  mutate(state_tx = ordered(state_tx, levels = c("Sensitive_DMSO", "EverR_DMSO",
+                                                 "Sensitive_Everolimus",
+                                                 "EverR_Everolimus"))) %>% 
+  mutate(state = ordered(state, levels = c("Sensitive", "EverR"))) %>% 
+  mutate_at(vars(Gene_Set, Gene_Set2, AUC.Scaled2, txTimePoint, state, cellLine,
+                 C_S, cellLine2, treatment, S_T, C_S_T, state2), factor)
+
+head(tmp)
+str(tmp)
+
+tmp1 <- tmp %>% 
+  filter(tx == "Everolimus") %>% 
+  droplevels() 
+
+mycomp <- list(c("Sensitive", "EverR"))
+
+names <- tmp1 %>% 
+  pull(Gene_Set) %>% 
+  unique() %>% 
+  as.character()
+
+#i <- names[1]
+stat.test <- foreach (i = names, .combine = "rbind") %do% { 
+  
+  print(i)
+  
+  tmp1 %>% 
+  filter(Gene_Set == i) %>% 
+  group_by(cellLine) %>% 
+  t_test(ssGSEA_Score ~ state, var.equal = F) %>%
+  add_xy_position(x = "state", scales = "free", step.increase = 0.1) %>% 
+  ungroup() %>% 
+  add_significance(p.col = "p") %>% 
+  mutate(Gene_Set = i)
+}
+
+#Pick groups
+stat.test1 <- stat.test %>% 
+  mutate(xmin = rep(c(0.35, 0.35, 0.45),2),
+         xmax = rep(c(1, 0.6, 0.8), 2)) %>% 
+  mutate(Gene_Set = ordered(Gene_Set, 
+                            levels = c("SMARCD3_preTxRegulonSignature",
+                                       "SMARCD3_postTxRegulonSignature"))) 
+stat.test1
+
+#tm <- paste0(gs, " Pre-Treatment Signature")
+
+#plot
+comparisons <- list(c("Sensitive", "EverR"))
+mycolors <- c("cyan3", "hotpink3")
+names(mycolors) <- c("Sensitive", "EverR")
+
+
+sig <- tmp1 %>% 
+  #ggplot(mapping = aes(x = ssGSEA_Score, y = AUC.Scaled)) +
+  ggplot(mapping = aes(x = AUC.Scaled, y = ssGSEA_Score)) +
+  geom_boxplot(mapping = aes(fill = state),
+               width = 0.2, show.legend = T) +
+  geom_point(mapping = aes(color = state), 
+             size = 1.5, show.legend = T) +
+  facet_grid(cellLine~Gene_Set, scales = "free") +
+  theme_bw() +
+  scale_fill_manual(values = mycolors) +
+  scale_color_manual(values = mycolors) +
+  theme(axis.text.x = element_text(size = 8, face = "bold"),
+        axis.text.y = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        legend.title = element_text(size = 9, face = "bold"),
+        strip.text = element_text(size = 9, face = "bold"),
+        strip.background = element_rect(fill = "white"),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(color = "black"),
+        axis.title.y = element_text(size = 9, face = "bold"),
+        axis.title.x = element_text(size = 9, face = "bold")) +
+  ylab(label = paste0("ssGSEA Score")) +
+  xlab(label = "AUC against Everolimus") +
+  guides(fill = guide_legend(title = "Cell State",
+                              override.aes = list(size = 4)),
+         color = "none"
+         ) +
+  stat_pvalue_manual(stat.test1, label = "{p.signif}", size = 5,
+                     tip.length = 0.025, bracket.size = .3, 
+                     step.increase = 0, coord.flip = T,
+                     hide.ns = F) +
+  #coord_cartesian(x = c(0,1.1)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2)))  +
+  coord_flip() 
+sig
+
+
+#Save
+.f = function() {
+
+#Save scores
+setwd(dir = paste0(dir, dir2, "rawScores/"))
+fwrite(gsva.data.all, file = paste0(prefix, "_", cellSamples, "_ssGSEA_scores", 
+                                   "_SMARCD3ResistanceRegulonSignatures",
+                                   "_preTx.postTx_modelInputFormat_v7.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+#Save AUC and ssGSEA scores for post treatment samples
+setwd(dir = paste0(dir, "dose_response"))
+fwrite(tmp1, file = paste(prefix, cellSamples, "AUC.txt", sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+fwrite(stat.test1, file = paste(prefix, cellSamples, "SMARCD3ResistanceRegulon",
+                                "Signatures_t_test_ssGSEA_statTx_v7.txt",
+                                sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Save plot
+sig
+ggsave(filename = paste(sample, cellSamples, 
+                        "SMARCD3ResistanceRegulonSignatures_ssGSEA_Scores_v7.tiff", 
+                          sep = "_"),
+       device = "tiff", units = "in", dpi = 300, width = 8, height = 3, 
+       path = paste0(dir, dir2, "/figures/"))
+}
+```

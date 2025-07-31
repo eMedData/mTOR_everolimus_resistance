@@ -1,0 +1,2557 @@
+---
+title: "SWI/SNF BRG1 (SMARCDA4) or BRM (SMARCA2)"
+output: html_document
+date: "2025-06-05"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(edgeR)
+library(GEOquery)
+library(annotables)
+library(RColorBrewer)
+library(plyr)
+library(ggplot2)
+library(cowplot)
+library(data.table)
+library(msigdbr)
+library(kableExtra)
+library(GSEABase)
+library(GSVA)
+library(conflicted)
+library(scales)
+library(foreach)
+library(GEOquery)
+library(RCurl)
+library(doParallel)
+library(ggpubr)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- c("VCaP", "LNCaP")
+#cellSamples <- "LNCaP"
+cellSamples1 <- "xiao_etal.2022"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "viper/"
+dir2 <- "pharmacogenomicsDataSets/gdsc_data/"
+```
+
+```{r}
+#SET SEED
+set.seed(06052025)
+
+#gset <- getGEO("GSE171523", GSEMatrix =TRUE, getGPL=T)
+#
+#gset2 <- gset$`GSE171592-GPL11154_series_matrix.txt.gz`
+
+
+#pd <- pData(gset2)
+
+setwd(paste0(dir, "geoData/", cellSamples1))
+#fwrite(pd, file = "xiao_etal_2022.txt", sep = "\t", col.names = T, 
+#       row.names = F, quote = F)
+
+pd <- fread(file = "xiao_etal_2022.txt", sep = "\t", header = T, quote = "")
+
+pd1 <- pd %>% 
+  select(geo_accession, title) %>% 
+  mutate(title = str_remove_all(title, pattern = " [(]RNA-seq[)]")) %>% 
+  separate(title, into = c("cellLine", "treatment", "rep", "hour"), 
+           sep = "_", remove = F) %>% 
+  unite(sample, c("cellLine", "treatment", "hour"), remove = F, sep = "_") %>% 
+  filter(treatment %in% c("DMSO", "AU"),
+         hour %in% c("24h"),
+         cellLine %in% cellSamples
+         #cellLine == "LNCaP"
+         ) %>% 
+  arrange(geo_accession)
+head(pd1)
+
+#Read in counts
+#Downloaded from https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE171523
+counts.df <- fread("GSE171523_raw_counts_GRCh38.p13_NCBI.tsv.gz", sep = "\t",
+             header = T, quote = F, fill = T)
+
+head(counts.df)[,1:5]
+
+
+#start.all <- Sys.time()
+
+
+#all(pd1$geo_accession == colnames(counts.df)[2:ncol(counts.df)])
+counts <- counts.df %>% 
+  rename("ENTREZID" = "GeneID") %>% 
+  select(all_of(c("ENTREZID", pd1$geo_accession))) %>% 
+  setnames(c("ENTREZID", pd1$title)) %>% 
+  as.data.frame() %>% 
+  arrange(ENTREZID)
+  
+dim(counts)
+head(counts)
+
+#Filter gene symbols in counts to match protein coding genes in grch37
+
+#Get gene symbols
+g <- counts %>%
+  as.data.frame() %>%
+  select(ENTREZID)
+dim(g)
+head(g)
+
+#Look at known genes from grch37
+head(grch38)
+
+#Get known gene symbols from grch37
+annot <- grch38 %>%
+  as.data.frame() %>%
+  dplyr::rename("ENTREZID" = "entrez",
+                "EN_G" = "ensgene",
+                "Gene_Symbol" = "symbol")
+dim(annot)
+head(annot)
+
+#Match gene symbols from grch37 to gene symbols in counts
+
+#Get protein coding genes
+annot <- annot %>% 
+  filter(ENTREZID %in% g$ENTREZID,
+         biotype == "protein_coding") %>% 
+  arrange(ENTREZID)
+dim(annot)
+head(annot)
+
+gids <- annot %>% 
+  select(ENTREZID, Gene_Symbol) %>% 
+  unique()
+
+
+counts <- counts %>% 
+  left_join(gids, by = "ENTREZID") %>% 
+  #select(-c(ENTREZID)) %>% 
+  select(ENTREZID, Gene_Symbol, everything()) %>% 
+  filter(!Gene_Symbol == "")
+head(counts)[,1:5]
+
+#Remove NAs 
+sum(is.na(annot))
+annot2 <- na.omit(annot)
+sum(is.na(annot))
+dim(annot)
+
+annot <- annot %>% 
+  arrange(Gene_Symbol)
+
+dim(counts)
+sum(is.na(counts))
+head(counts)[,1:5]
+
+#Match gene symbols 
+counts <- counts %>%
+  filter(Gene_Symbol %in% annot$Gene_Symbol)
+head(counts)[,1:5]
+dim(counts)
+
+annot <- annot[match(counts$Gene_Symbol, annot$Gene_Symbol),]
+dim(annot)
+head(annot)
+
+.f = function() {
+if (all(annot$Gene_Symbol == counts$Gene_Symbol)) {
+  print("gene symbols match, saving counts matched to protein coding genes")
+  
+  setwd(paste0(dir, "geoData/", cellSamples1))
+  write.table(counts, file = paste0(cellSamples1, "_raw_RNA.seq_", 
+                                    "ProteinCodingGenes_counts.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+  
+  write.table(annot, file = paste0(cellSamples1, "_ProteinCodingGenes_info.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+}
+
+}
+#Read in cell annotations
+###Dataset downloaded from https://depmap.org/portal/data_page/?tab=allData
+
+
+#USE EDGER TO NORMALIZE AND FILTER COUNTS
+
+
+#Determine group size for each sample
+
+# USE EDGER TO NORMALIZE AND FILTER COUNTS
+#DETERMINE GROUP SIZE FOR EACH SAMPLE
+#rep(x, each = 3), x is number-range of cols (samples) in counts 
+# divided by 3 (triplicates) 
+#(e.g., col=36 (here, 12 samples in triplicates), 36/3=12; rep(1:12))
+
+#Create edgeR object
+
+
+#Combine duplicate gene symbols by taking the mean of probes mapped to identical
+## gene symbols
+
+#Check how many duplicate gene symbols
+p.tmp <- counts %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+#Filter for duplicates
+p.tmp1 <- p.tmp %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character()
+
+#Filter expression object for duplicates
+counts.tmp <- counts %>% 
+  filter(Gene_Symbol %in% p.tmp1) %>% 
+  select(-c(ENTREZID))
+
+#Loop through duplicates to calculate the mean
+start <- Sys.time()
+registerDoParallel(cl <- makeCluster(4))
+#i <- p.tmp1[1]
+counts.mean <- foreach(i = p.tmp1, .combine = "rbind") %dopar% {
+  print(i)
+  require(tidyverse)
+  
+  #g.tmp %>%
+  counts.tmp %>% 
+    filter(Gene_Symbol == i) %>% 
+    pivot_longer(!Gene_Symbol, names_to = "sample", values_to = "expr") %>% 
+    group_by(Gene_Symbol, sample) %>% 
+    summarize(mean = mean(expr)) %>% 
+    pivot_wider(names_from = "sample", values_from = mean)
+}
+stopCluster(cl)
+rm(cl)
+
+end <- Sys.time()
+end-start
+
+#Get genes NOT duplicated
+counts2 <- counts %>% 
+  select(-c(ENTREZID)) %>% 
+  filter(!Gene_Symbol %in% p.tmp1) %>% 
+  full_join(counts.mean, colnames(.)) %>% 
+  arrange(Gene_Symbol)
+
+head(counts2)[,1:5]
+
+#Confrim no duplicated genes in new data frame
+p.tmp <- counts2 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  filter(count >= 2)
+
+  annot2 <- annot %>% 
+    #select(-c(EN_G, ENTREZID)) %>% 
+    select(-c(chr, start, end, strand)) %>% 
+    unique() %>% 
+    arrange(Gene_Symbol)
+
+if (all(annot2$Gene_Symbol == counts2$Gene_Symbol)) {
+  
+  counts2 <- counts2 %>% 
+    column_to_rownames(var = "Gene_Symbol") %>% 
+    as.matrix()
+  x1 <- ncol(counts2)
+  x2 <- x1/2
+  group <- rep(1:x2, each = 2)
+  
+  y <- DGEList(counts = counts2, group = group, genes = annot2)
+  y
+  
+  y$samples$lib.size <- colSums(y$counts)
+  
+  y$samples <- y$samples %>% 
+    rownames_to_column(var = "title") %>% 
+    left_join(pd1, by = "title") %>% 
+    mutate(sample2 = title) %>% 
+    column_to_rownames(var = "sample2")
+}
+
+head(y$samples)
+#For graphs: Use logCPM for exploratory plots.
+##calculate mean and median cpm cutoffs
+# Any two read counts with same CPM values will also have same logCPM values.
+## Prior count avoids taking log of zero, and reduces spurious variability
+## for genes with low counts -> shrinks all inter-sample logFC-changes towards
+## zero.
+#Convert to log2-CPM. log = T will add offset to CPM values before converting
+## to log2-scale. Offset is 2/L; 2 = prior counts, L = average lib size in mill.
+## logCPM values related to CPM values by log2(CPM + 2/L). 
+
+L <- mean(y$samples$lib.size) * 1e-6 #average lib size in millions
+M <- median(y$samples$lib.size) * 1e-6
+c(L, M)
+#Minimum number of genes kept in filtering = 10 in minimum number of samples
+## (minimum number of samples based on grouping factor)
+lcpm.cutoff <- log2(10/M + 2/L) 
+nsamples <- ncol(y)
+
+#expand color palette
+col <- colorRampPalette(brewer.pal(9, "Set1"))
+
+#Look at Unfiltered logCPM
+## counts are log2(cpm + 2L) normalized
+lcpm.unfilt <- cpm(y, log = T)
+#added to cpm before log2: 2^logcpm - cpm = d; d + cpm = log2(cpm)
+cpm.unfilt <- cpm(y, log = F)
+counts.unfilt <- y$counts
+
+dim(lcpm.unfilt)
+r.lcpm.unf <- nrow(lcpm.unfilt)
+
+#Extra QC plots of unfiltered data
+
+.f = function() {
+
+head(summary(lcpm.unfilt))[,1:5]
+
+setwd(dir = paste0(dir, "geoData/xiao_etal.2022/figures/"))
+
+#Box plot
+tiff(file = paste(cellSamples1, cellSamples, "QC_logCPM_unfiltered_boxplot.tiff",
+                 sep = "_"), width = 10, height = 6, units = "in", res = 300)
+boxplot(lcpm.unfilt, col = col(nsamples))
+title(main="A. Raw data", xlab="Log-cpm")
+dev.off()
+
+#Density plot
+tiff(file = paste(cellSamples1, cellSamples, "QC_logCPM_unfiltered", 
+                       r.lcpm.unf, "distribution_test.tiff", sep = "_"),
+    width = 10, height = 6, units = "in", res = 300)
+
+plot(density(lcpm.unfilt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), 
+     las=2, main="", xlab="")
+title(main="Unfiltered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.unfilt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#snames <- rownames(y$samples)
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+.f = function() {
+pdf(file = paste(cellSamples1, cellSamples, "QC_unfiltered", r.lcpm.unf,
+                "gene_expression_MDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.unfilt, labels = y$samples$sample,
+        cex = 0.7, 
+        dim.plot = c(1,2))
+title(main="Average (root-mean-square) of largest logFC changes", 
+      #xlab="Log-cpm"
+      )
+dev.off()
+}
+
+
+#Save unfiltered counts
+setwd(dir = paste0(dir, "geoData/", cellSamples1))
+
+# Save logCPM unfiltered values
+tmp <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "log2CPM.unfiltered",
+                                      r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+  
+# Save CPM unfiltered values
+tmp <- cpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "CPM.unfiltered",
+                                     r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts unfiltered values
+tmp <- counts.unfilt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "Counts.unfiltered", 
+                         r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+
+
+#Get mean and variance relationship: use raw counts or CPM
+#summ <- counts.unfilt %>%
+summ <- cpm.unfilt %>%
+#summ <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "log2CPM") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(log2CPM),
+            sd = sd(log2CPM),
+            var = stats::var(log2CPM))
+plot(x = log(summ$mean, base = 2), y = log(summ$var, base = 2))
+#plot(x = summ$mean, y = summ$var)
+
+
+#Set directory for unfiltered plots
+setwd(dir = paste0(dir, "geoData/", cellSamples1, "/figures/"))
+
+#ggplot mean vs variance in log2
+tiff(file = paste(cellSamples1, cellSamples, "mean_vs_variance_counts_unfiltered.tiff", 
+                 sep = "_"), width = 6, height = 4, units = "in", res = 300)
+ggplot(summ, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+#ggplot(summ, mapping = aes(x = mean, y = var)) +
+  geom_point() +
+  #ylim(c(9.572694e-31,1.234371e+01)) +
+  #xlim(c(-3.419904, 13.456157)) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  theme_classic() +
+  labs(title = "Mean vs Variance unfiltered Counts")
+dev.off()
+
+
+} #End skip
+
+#FILER EDGER OBJECT FOR LOW EXPRESSED GENES
+
+##(e.g., median library size M = ~7 Million reads
+## 10/7 = ~1.43 - filterByExpr will keep genes with CPM
+## of 1.43 or more in at least 1 samples (no replicates here)).
+##Filter based on grouping factor of interest that will be tested. 
+## Here chose group as grouping factor
+dim(y)
+keep <- filterByExpr(y, group = y$samples$treatment)
+table(keep)
+y1 <- y[keep, , keep.lib.sizes = F]
+dim(y1)
+
+#TMM library normalization
+y1 <- calcNormFactors(y1, method = "TMM")
+
+#Look at filtered logCPM
+lcpm.filt <- cpm(y1, log = T)
+cpm.filt <- cpm(y1, log = F)
+counts.filt <- y1$counts
+
+
+#Make DF for summary statistics
+
+#Get mean and variance
+summ1 <- counts.filt %>%
+#summ1 <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "counts") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(counts),
+            sd = sd(counts),
+            var = stats::var(counts))
+plot(x = log(summ1$mean, base = 2), y = log(summ1$var, base = 2))
+
+.f = function() {
+#Check var/mean relatioship
+setwd(dir = paste0(dir, "geoData/", cellSamples1, "/figures/"))
+
+tiff(file = paste(cellSamples1, cellSamples, "mean_vs_variance_counts_filtered.tiff", 
+                 sep = "_"),
+     width = 6, height = 4, units = "in", res = 300)
+ggplot(summ1, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  labs(title = "Mean vs Variance filtered Counts") +
+  theme_classic()
+dev.off()
+
+q.g <- quantile(summ1$var, seq(0,1, 0.1))
+
+#Get genes with variance greater than 20% of distribution
+summ2 <- summ1 %>% 
+  filter(var >= q.g[3])
+}
+
+
+r.lcpm.filt <- nrow(lcpm.filt)
+r.lcpm.filt
+
+#Extra QC plots of filtered data
+
+.f = function() {
+
+
+head(summary(lcpm.filt))[,1:5]
+#boxplot(log2(counts.filt), col = col(nsamples))
+
+tiff(file = paste0(cellSamples1, "_QC_logCPM_filtered_boxplot.tiff"),
+      width = 6, height = 4, units = "in", res = 300)
+boxplot(lcpm.filt, col = col(nsamples))
+title(main="A. Filtered data", xlab="Log2CPM")
+dev.off()
+
+L <- mean(y1$samples$lib.size) * 1e-6 
+M <- median(y1$samples$lib.size) * 1e-6
+c(L, M)
+lcpm.cutoff <- log2(10/M + 2/L)
+
+#Plot filtered library
+tiff(file = paste(cellSamples1, cellSamples, "QC_filtered", r.lcpm.filt,
+                 "distribution.tiff", sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+plot(density(lcpm.filt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), las=2, 
+     main="", xlab="")
+title(main="Filtered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.filt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+
+.f = function() {
+#plot MDS
+pdf(file = paste(cellSamples1, cellSamples, "QC_filtered", r.lcpm.filt,
+                 "gMDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.filt, labels = y1$samples$tissue, 
+        cex = 0.7, 
+        dim.plot = c(1,2)
+        )
+title(main="Average (root-mean-square) of largest logFC changes"
+      #xlab="Log-cpm"
+      )
+dev.off()
+
+}
+
+#Plot library size
+tiff(file = paste(cellSamples1, "filtered_library_sizes.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+barplot(y1$samples$lib.size, 
+        names=y1$samples$group, 
+        ylab="Library size (Read depth)",
+        col = "grey", angle = 45)
+title("Normalize Library Size")
+abline(h=median(y1$samples$lib.size), col = "red")
+dev.off()
+
+#save filtered lib.size for integrated barplot
+t <- data.frame(y1$samples)
+
+tiff(file = paste(cellSamples1, cellSamples, "filtered_library_sizes_ggplot.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+ggplot(t, mapping = aes(x = title, y = lib.size, fill = treatment)) + 
+  geom_col() + 
+  theme_classic() +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  geom_hline(aes(yintercept =  median(lib.size)), color = "red") +
+  #labs(title = paste0(unique(CellLine), " Normalized libary")) +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(size = 8, face = "bold", 
+                                          hjust = .9, vjust = .9)) +
+  theme(legend.position = "none") +
+  labs(title = paste0("normalized library"))
+dev.off()
+
+
+#SAVE metadata
+setwd(dir = paste0(dir, dir1, dir2, "/counts/filtered/"))
+
+#Library
+fwrite(t, file = paste(cellSamples1, "filtered_library_sizes.txt", 
+                            sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+
+#Save filtered counts
+setwd(dir = paste0(dir, "/geoData/", cellSamples1))
+
+# Save logCPM filtered values
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "log2CPM.filtered",
+                                      r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+#read in
+r.lcpm.filt <- "113130"
+tmp <- fread(file = paste0("xiao_etal.2022_VCaP_LNCaPfiltered_13130",
+                           "_geneExpression_LongFormat.txt"),
+            sep = "\t", header = T, quote = "")
+
+lcpm.filt <- tmp %>% 
+  select(Gene_Symbol, log2CPM, title) %>%
+  #group_by(Gene_Symbol, sample) %>% 
+  #summarise(log2CPM = mean(log2CPM)) %>% 
+  pivot_wider(names_from = "title", values_from = "log2CPM") %>% 
+  as.data.frame() %>% 
+  column_to_rownames(var = "Gene_Symbol")
+
+
+# Save CPM filtered values
+tmp <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "CPM.filtered",
+                                     r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts filtered values
+tmp <- counts.filt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "Counts.filtered", 
+                         r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+}
+
+#MAKE DATAFAME in long format
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "log2CPM")
+
+tmp1 <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "CPM")
+
+tmp2 <- counts.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "counts")
+
+
+b.data <- tmp %>% 
+  left_join(tmp1, by = c("Gene_Symbol", "title")) %>% 
+  left_join(tmp2, by = c("Gene_Symbol", "title")) %>% 
+  left_join(pd1, by = "title")
+head(b.data)
+dim(b.data)
+
+.f = function() {
+#SAVE DATAFRAME FOR STATISTICAL TESTING
+setwd(dir = paste0(dir, "/geoData/", cellSamples1))
+fwrite(b.data, file = paste(cellSamples1, "VCaP_LNCaPfiltered", r.lcpm.filt, 
+                            "geneExpression_LongFormat.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+#Read in
+r.lcpm.filt <- "13130"
+b.data <- fread(file = paste(cellSamples1, "VCaP_LNCaPfiltered", r.lcpm.filt, 
+                            "geneExpression_LongFormat.txt", sep = "_"),
+            sep = "\t", header = T, quote = "")
+
+
+} #End
+
+
+#end.all <- Sys.time()
+#end.all-start.all
+#Time difference of 1.062313 mins
+
+#st <- b.data %>% 
+#  filter(Gene_Symbol %in% g.keep) %>% 
+#  group_by(sample, Gene_Symbol) %>% 
+#  summarise(mean = mean(log2CPM),
+#            sd = sd(log2CPM),
+#            se = sd/length(sample)) %>% 
+#  ungroup()
+
+
+mycomp <- list(c("VCaP_DMSO_24h", "VCaP_AU_24h"),
+               c("LNCaP_DMSO_24h", "LNCaP_AU_24h"))
+
+g.keep <- c("IGF1R", "MAP2K1", "MAP2K2", "CASP7", "MAPK3", "MAPK1")
+
+
+tmp3 <- b.data %>% 
+  filter(Gene_Symbol %in% g.keep) %>% 
+  mutate(Gene_Symbol = ordered(Gene_Symbol, 
+                               levels = g.keep)) %>% 
+  #left_join(st, by = c("sample", "Gene_Symbol")) %>% 
+  mutate(title = ordered(title, levels = pd1$title)) %>% 
+  unite(sample, c("cellLine", "treatment", "hour"), sep = "_", remove = F) %>% 
+  mutate(sample = ordered(sample, levels = c(
+                                             "VCaP_AU_24h","VCaP_DMSO_24h", 
+                                             "LNCaP_AU_24h", "LNCaP_DMSO_24h"
+                                             ))) %>% 
+  mutate(treatment = ordered(treatment, levels = c("DMSO", "AU")))
+
+c.line <- c("VCaP", "LNCaP")
+j <- c.line[1]
+i <- g.keep[1]
+
+stat.test <- data.frame()
+for (j in c.line) {
+
+  for (i in g.keep) {
+  
+    print(i)
+    print(j)
+
+  tmp3.1 <- tmp3 %>% 
+    filter(Gene_Symbol == i,
+           cellLine == j)
+  if (bartlett.test(log2CPM ~ treatment, data = tmp3.1)$p.value > 0.05) {
+    print("fail to rejuect equal variance")
+  print("will assume equal variance")
+  print("using Students's t test")
+  
+  } else {
+    print("p-value is less than 0.05")
+  print("assume varaince not equal")
+  print("using Welch's t test")
+  stop()
+   } 
+  }
+  print("done")
+}
+
+
+
+
+stat.t <- tmp3 %>% 
+  group_by(Gene_Symbol, cellLine) %>% 
+  t_test(formula = log2CPM ~ treatment, var.equal = T) %>% 
+  add_significance() %>% 
+  ungroup()
+  
+
+stat.test <- tmp3 %>% 
+    filter(Gene_Symbol %in% g.keep) %>% 
+    mutate(across(log2CPM, as.numeric)) %>% 
+    group_by(Gene_Symbol, cellLine) %>% 
+    summarise(y.position = max(log2CPM) + .5) %>% 
+  ungroup() %>% 
+  right_join(stat.t, by = c("Gene_Symbol", "cellLine")) %>% 
+  mutate(hour = "24h") %>% 
+  unite(group1, c(cellLine, group1, hour), sep = "_", remove = F) %>% 
+  unite(group2, c(cellLine, group2, hour), sep = "_", remove = F)
+
+tmp3 %>% 
+  ggplot(mapping = aes(x = sample, y = log2CPM)) +
+  geom_pointrange(stat = "summary", fun.min = min, fun.max = max, fun = mean,
+                  alpha = 0.5, size = .1) +
+  geom_point(mapping = aes(color = sample), size = 2,
+             position = position_jitterdodge(0.3, dodge.width = .1), 
+             alpha = .9, show.legend = T) +
+  theme_classic() +
+  facet_wrap(~Gene_Symbol, scales = "free") +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_text(size = 9, face = "bold"),
+        axis.title = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 10),
+        legend.text = element_text(size = 8, face = "bold"),
+        legend.title = element_text(size = 8, face = "bold"),
+        #plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+        #panel.border = element_rect(color = "white")
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.2, "cm")
+        ) +
+  #theme(axis.text = element_text(size = 6, face = "bold", angle = 25, 
+  #                               vjust = .5, hjust = 1),
+  #      strip.text = element_text(size = 8),
+  #      strip.background = element_blank()) +
+  xlab(label = "") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1))) +
+  stat_pvalue_manual(mapping = aes(y = log2CPM),
+                     stat.test, label = "p", 
+                     size = 3,
+                     tip.length = 0.03, bracket.size = .2, 
+                     hide.ns = F, coord.flip = T) +
+  #stat_compare_means(comparisons = mycomp, var.equal = F,
+  #                   method = "t.test", size = 4,
+  #                   aes(label = after_stat(p.signif)), 
+  #                   size = 3
+  #                   ) +
+  coord_flip()
+
+
+  
+ggsave(filename = paste0(cellSamples1, "_SWI.SNF_inhibitor_AU15330",
+                         #"_VCaP_LNCaP_samples_barPlot.tiff"), 
+                         "_VCaP_LNCaP_samples_barPlot_pvals_v2.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/", cellSamples1, "/figures"), 
+          units = "in", width = 10, height = 3.5, dpi = 300, create.dir = T)
+
+
+#keep top 3
+g.keep2 <- c("IGF1R", "MAP2K1", "CASP7")
+
+stat.test2 <- stat.test %>% 
+  filter(Gene_Symbol %in% g.keep2) 
+
+tmp3 %>% 
+  filter(Gene_Symbol %in% g.keep2) %>% 
+  droplevels() %>% 
+  mutate(Gene_Symbol = ordered(Gene_Symbol, levels = g.keep2)) %>% 
+  ggplot(mapping = aes(x = sample, y = log2CPM)) +
+  geom_pointrange(stat = "summary", fun.min = min, fun.max = max, fun = mean,
+                  alpha = 0.5, size = .1) +
+  geom_point(mapping = aes(color = sample), size = 2,
+             position = position_jitterdodge(0.3, dodge.width = .1), 
+             alpha = .9, show.legend = T) +
+  theme_classic() +
+  facet_wrap(~Gene_Symbol, scales = "free") +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_text(size = 9, face = "bold"),
+        axis.title = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 10),
+        legend.text = element_text(size = 8, face = "bold"),
+        legend.title = element_text(size = 8, face = "bold"),
+        #plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+        #panel.border = element_rect(color = "white")
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.2, "cm")
+        ) +
+  #theme(axis.text = element_text(size = 6, face = "bold", angle = 25, 
+  #                               vjust = .5, hjust = 1),
+  #      strip.text = element_text(size = 8),
+  #      strip.background = element_blank()) +
+  xlab(label = "") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1))) +
+  stat_pvalue_manual(mapping = aes(y = log2CPM),
+                     stat.test2, 
+                     #label = "p",
+                     label = "p.signif",
+                     size = 3,
+                     tip.length = 0.03, bracket.size = .2, 
+                     hide.ns = F, coord.flip = T) +
+  #stat_compare_means(comparisons = mycomp, var.equal = F,
+  #                   method = "t.test", size = 4,
+  #                   aes(label = after_stat(p.signif)), 
+  #                   size = 3
+  #                   ) +
+  coord_flip()
+
+
+  
+ggsave(filename = paste0(cellSamples1, "_SWI.SNF_inhibitor_AU15330",
+                         "_VCaP_LNCaP_samples_barPlot_psignif_v3.tiff"), 
+                         #"_VCaP_LNCaP_samples_barPlot_pvals_v3.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/", cellSamples1, "/figures"), 
+          units = "in", width = 10, height = 1.8, dpi = 300, create.dir = T)
+
+
+
+setwd(dir = paste0(dir = dir, dir1, "preTx2"))
+#list.files()
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers_",
+                            "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  unique() %>% 
+  as.list()
+preT
+
+#Post-treatment signature
+setwd(dir = paste0(dir = dir, dir1, "postTx2"))
+#list.files()
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_AllRegulonMembers_",
+                             "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  unique() %>% 
+  as.list()
+postT
+
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- preT %>% 
+  names()
+
+preTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- preT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  preTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+preTx
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- postT %>% 
+  names()
+
+postTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- postT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  postTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+postTx
+
+#Put  regulons into list for pre and post treatment for enrichment analysis
+pathways_mr <- list(c(preTx, postTx))
+
+names(pathways_mr) <- "SMARCD3"
+
+
+collection <- c("H", "C2", names(pathways_mr))
+
+#Get gene members in SMARCD3, mTOR, MAPK sigs
+system.time(
+
+gsva_mr <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  
+  if (i == collection[3]) {
+    pathways <- pathways_mr[[i]]
+  
+  #Run ssgsea
+  ssgseaP <- ssgseaParam(exprData = as.matrix(lcpm.filt), 
+                         geneSets =  pathways, minSize = 15, maxSize = 500,
+                         alpha = 0.25, normalize = T)
+  gsva(ssgseaP, verbose=TRUE)
+  } else {
+  pathways <- msigdbr(species = "Homo sapiens", category = i) %>%
+    select(gs_name, gene_symbol) %>% 
+        unique() %>%
+    group_by(gs_name)
+  
+  pathways <- split(x = pathways$gene_symbol, f = pathways$gs_name)
+  
+  ssgseaP <- ssgseaParam(exprData = as.matrix(lcpm.filt), 
+                         geneSets =  pathways, minSize = 15, maxSize = 500,
+                         alpha = 0.25, normalize = T)
+  gsva(ssgseaP, verbose=TRUE)
+  
+    }
+  }
+)
+
+
+#Elapsed time = 20.794
+
+#Look at first 5 variables in regulons element in list
+dim(gsva_mr)
+head(gsva_mr)
+
+mycomp <- list(c("VCaP_DMSO", "VCaP_AU"), c("LNCaP_DMSO", "LNCaP_AU"))
+
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 "SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 "BIOCARTA_MAPK_PATHWAY", "KEGG_MAPK_SIGNALING_PATHWAY",
+                 "REACTOME_ERK_MAPK_TARGETS", 
+                 "REACTOME_MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                 "KEGG_INSULIN_SIGNALING_PATHWAY",
+                 "REACTOME_ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                 "REACTOME_SIGNALLING_TO_RAS",
+                 "REACTOME_RAF_INDEPENDENT_MAPK1_3_ACTIVATION")
+
+gsva.tmp1 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set") %>%
+  #filter(Gene_Set %in% geneSets.oi[5:11]) %>% 
+  #mutate(Gene_Set = ordered(Gene_Set, 
+  #                          levels = geneSets.oi)) %>% 
+  pivot_longer(!Gene_Set, names_to = "title", values_to = "EnrichmentScore") %>% 
+  separate(title, into = c("cellLine", "treatment", "rep", "hour"),
+           sep = "_", remove = F) %>% 
+  unite(CellLine_Treatment, c("cellLine", "treatment"), remove = F, sep = "_") %>% 
+  mutate(CellLine_Treatment = ordered(CellLine_Treatment, 
+                                      levels = c("VCaP_DMSO", "VCaP_AU",
+                                                 "LNCaP_DMSO", "LNCaP_AU")))
+
+
+gsva.tmp2 <- gsva.tmp1 %>% 
+  group_by(Gene_Set, cellLine) %>% 
+  t_test(EnrichmentScore ~treatment, var.equal = T,
+         p.adjust.method = "fdr") %>% 
+  ungroup()
+
+gsva.tmp3 <- gsva.tmp1 %>% 
+  group_by(Gene_Set, cellLine, treatment) %>% 
+  summarise(mean = mean(EnrichmentScore)) %>% 
+  mutate(FC = abs(last(mean)/first(mean))) %>% 
+  #mutate(abs_FC = abs(FC)) %>% 
+  ungroup() 
+  
+
+gsva.tmp4 <- gsva.tmp2 %>% 
+  left_join(gsva.tmp3, by = c("Gene_Set", "cellLine")) %>% 
+  filter(p <= 0.05,
+         FC >= 1)
+
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 #"SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 #"BIOCARTA_MAPK_PATHWAY", "KEGG_MAPK_SIGNALING_PATHWAY",
+                 #"REACTOME_ERK_MAPK_TARGETS", 
+                 #"REACTOME_MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                 #"KEGG_INSULIN_SIGNALING_PATHWAY",
+                 #"REACTOME_ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                 #"REACTOME_SIGNALLING_TO_RAS",
+                 #"REACTOME_RAF_INDEPENDENT_MAPK1_3_ACTIVATION",
+                 "BIOCARTA_ERK_PATHWAY",
+                 #"REACTOME_GASTRIN_CREB_SIGNALLING_PATHWAY_VIA_PKC_AND_MAPK",
+                 "PACHER_TARGETS_OF_IGF1_AND_IGF2_UP",
+                 #paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_",
+                #        "IGF_TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_",
+                #        "FACTOR_BINDING_PROTEINS_IGFBPS"),
+                 "MULLIGAN_NTF3_SIGNALING_VIA_INSR_AND_IGF1R_UP",
+                 #"REACTOME_REGULATION_OF_INSULIN_SECRETION",
+                 "BILD_HRAS_ONCOGENIC_SIGNATURE")
+
+
+c.line <- c("VCaP", "LNCaP")
+j <- c.line[1]
+i <- geneSets.oi[1]
+tmp3 <- gsva.tmp1
+stat.test <- data.frame()
+for (j in c.line) {
+
+  for (i in geneSets.oi) {
+  
+    print(i)
+    print(j)
+
+  tmp3.1 <- tmp3 %>% 
+    filter(Gene_Set == i,
+           cellLine == j)
+  if (bartlett.test(EnrichmentScore ~ treatment, data = tmp3.1)$p.value > 0.05) {
+    print("fail to rejuect equal variance")
+  print("will assume equal variance")
+  print("using Students's t test")
+  
+  } else {
+    print("p-value is less than 0.05")
+  print("assume varaince not equal")
+  print("using Welch's t test")
+  #stop()
+   } 
+  }
+  print("done")
+}
+
+
+
+gsva.tmp1 %>% 
+  filter(Gene_Set %in% geneSets.oi#[10:16]
+         ) %>% 
+  #filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>% 
+  ggplot(mapping = aes(x = CellLine_Treatment, y = EnrichmentScore)) +
+  geom_violin(mapping = aes(fill = treatment, color = treatment),
+              width = 0.5, alpha = .6, show.legend = T) +
+  #geom_boxplot(mapping = aes(fill = treatment),
+  #             alpha = 0.2, width = 0.3, color = "grey", show.legend = F) +
+  geom_point(size = 1,
+             #position = position_jitterdodge(0.4, dodge.width = .1), 
+             alpha = .9, show.legend = F) +
+  theme_classic() +
+  #theme_bw() +
+  #scale_fill_manual(values = mycolors) +
+  facet_wrap(~Gene_Set, scales = "free", ncol = 3) +
+  #facet_grid(cellLine~Gene_Set, scales = "free") +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_text(size = 6, face = "bold", 
+                                   angle = 20, vjust = .5),
+        strip.text = element_text(size = 5.8, face = "bold", hjust = 0.5),
+        axis.title.y.left = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 6, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.5, "cm"),
+        legend.key.size = unit(.5, "lines")) +
+  #facet_grid(Tx_TimePoint2 ~ Gene_Set, scales = "free") + +
+  stat_compare_means(
+    #comparisons = list(c("A549_DMSO", "A549_BRM014")),                 
+    comparisons = mycomp,
+                     method = "t.test",
+                     method.args = list(var.equal = T), 
+                     aes(label = after_stat(p.signif)),
+                     label = "p.format"
+                     ) +
+  ylab("ssGSEA score") +
+  xlab("") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2)) 
+
+ggsave(filename = paste0(cellSamples1, "_SWI.SNF_inhibitor_AU15330_",
+                         "VCapP_LNCaP_samples_ssGSEA_SMARCD3preTx_MAPK_IGF1R_Sigs.tiff"), 
+                         #"VCapP_LNCaP_samples_ssGSEA_SMARCD3preTxSig_pvals.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/", cellSamples1, "/figures"), 
+          units = "in", width = 8, height = 3.5, dpi = 300, create.dir = T)
+
+
+
+
+
+
+
+
+#Heatmap
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 "SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 "BIOCARTA_MAPK_PATHWAY")
+
+
+collection <- c("H","C2")
+
+system.time(
+
+pathways.all <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  msigdbr(species = "Homo sapiens", category = i) %>%
+    select(gs_name, gene_symbol) %>% 
+    unique() %>% 
+    mutate(collection = i)
+  
+  }
+)
+
+
+#Make heatmap with for loop
+#i <- geneSets.oi[2]
+
+for (i in geneSets.oi) {
+  print(i)
+  
+  if (i == "SMARCD3_preTxRegulonSignature") {
+    top.merg <- preTx[[i]]
+  } else if (i == "SMARCD3_postTxRegulonSignature") {
+    top.merg <- postTx[[i]]
+  } else { 
+    top.merg <- pathways.all %>% 
+      filter(gs_name == i) %>% 
+      pull(gene_symbol) %>% 
+      unique() %>% 
+      as.character()
+  }
+
+#Look at genes in specific signature
+heat1 <- counts2[rownames(counts2) %in% top.merg, ]
+
+.f = function() {
+c <- heat1[,grepl(pattern = "VCaP", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "LNCaP", colnames(heat1))]
+m2 <- t(scale(t(heat1)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+t <- heat1[,grepl(pattern = "LAPC4", colnames(heat1))]
+t2 <- t(scale(t(t)))
+t2 <- t2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  select(all_of(c(pd1$title))) %>%
+  as.matrix()
+}
+
+heat2 <- t(scale(t(heat1))) %>% 
+  na.omit() %>% 
+  as.data.frame() %>% 
+  as.matrix()
+
+#ex4 <- 2^ex3[,2:ncol(ex3)]
+#heat2 <- ex4[rownames(ex4) %in% top.merg, ]
+
+
+#Get row names and genes
+tmp <- rownames(heat2) %>% 
+  as.data.frame() %>% 
+  rename("Gene" = ".") %>% 
+  #separate(gs, into = c("g1", "g2"), remove = F, extra = "merge", sep = "_") %>% 
+  rownames_to_column(var = "rn")
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene = rownames(heat2),
+                   gs = i)
+
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  rownames_to_column(var = "rn") %>% 
+  left_join(tmp, by = "Gene") %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(gs == geneSets.oi[1],  "#8B5A00",
+                      ifelse(gs ==  geneSets.oi[2], "rosybrown2",
+                      ifelse(gs == geneSets.oi[3],  "cyan4",
+                      ifelse(gs == geneSets.oi[4], "#4A1486",
+                      #ifelse(gs %in% INFLAMMATION, "orchid2",
+                      #ifelse(gs %in% LYSOSOME, "#006400",
+                      #ifelse(gs %in% METABOLISM, "lightpink3",
+                      #ifelse(gs %in% CELL_SURFACE_MARKERS, "deeppink3",
+                               "" #))))
+                               ))))) %>%
+  pull(color) %>%
+  as.character()
+
+assign(paste0(i, "_1"), rownames(heat2) %in% top.merg)
+
+
+fsize <- 10
+width <- 2
+
+#PICK COLOR FOR HEATMAP
+ramp <- colorRamp(c("darkred", "lightblue", "black"))
+ramp.list <- rgb(ramp(seq(0, 1, length = 10)), max = 255)
+ramp.list
+#barplot(rep(1, 10), axes = FALSE, space = 0, col = ramp.list)
+#dark.red <- "#800000"
+white.grey <- "#FFFFFF" #white
+light.blue <- "#B6DCE8" #light blue
+dark.red <- "#8B0000"#read
+myCol <- colorRampPalette(c(light.blue, white.grey, dark.red))(100)
+myBreaks <- seq(-1.2, 1.2, length.out=101)
+
+state.df <- heat2
+#colnames(state.df)  <- c(rep("DMSO", 2), rep("SWI/SNFi", 8), rep("DMSO", 2),
+#                         rep("SWI/SNFi", 4), rep("DMSO", 2), rep("SWI/SNFi", 4),
+#                         rep("DMSO", 2))
+
+colnames(state.df)  <- c(rep("DMSO", 2), rep("SWI/SNFi", 2)
+                         #rep("DMSO", 3), rep("SWI/SNFi", 3)
+                         )
+
+#names.s <- colnames(heat2)
+#state.df.factor <- factor(colnames(state.df), 
+#                          levels = names.s)
+
+
+cells.df <- heat2
+colnames(cells.df) <- c(
+                        #rep("VCaP", 4)
+                        rep("LNCaP", 4)
+                        )
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(state.df),
+                               #SWI_SNFi = state.df.factor
+                               col = list(Treatment  = c(
+                                 "DMSO" = "blue",
+                                 "SWI/SNFi" = "purple"),
+                                 CellLines = c("VCaP" = "yellow",
+                                            "H1299" = "brown3")))
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               #CellLines = colnames(cells.df),
+                               Treatment = colnames(state.df),
+                               #SWI_SNFi = state.df.factor
+                               col = list(SWI_SNFi  = c(
+                                                        "DMSO" = "blue",
+                                                        "SWI/SNFi" = "purple"
+                              #                          "T47D" = "brown4"
+                                                        )))
+#plot heatmap
+hmapGSEA <- Heatmap(heat2,
+                    #top_annotation = column_ha,
+                    column_title_gp = gpar(fontsize = 5),
+                    row_title_gp = gpar(fontsize = 5),
+                    show_column_names = T,
+                    cluster_columns = F) +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 9, col = tmp.3, fontface = "bold"),
+        padding = unit(1, "mm")),
+        annotation_name_rot = 45) +
+  Heatmap(get(paste0(i, "_1")) + 0,
+          name = i, col = c("0" = "white", "1" = unique(tmp.3)),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = unique(tmp.3),
+                                 fontface = "bold"), column_names_rot = 30)
+
+
+#Save plots
+setwd(dir = paste0(dir, "geoData/"))
+
+#Save heatmap with annotations
+tiff(file = paste0("xiao_etal2022_", i, 
+                   #"_VCaP_",
+                   "_LNCaP_",
+                   "geneMembers.tiff"), 
+     width = 10, height = 17, units = "in", res = 300)
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+  
+} #End loop
+```
+
+
+```{r}
+c <- fread(file = "~/Downloads/GSE198517_raw_counts_GRCh38.p13_NCBI.tsv.gz",
+             sep = "\t", header = T, quote = "", fill = T)
+
+
+pd <- data.frame(geo_accession = colnames(c[,2:ncol(c)]),
+                     title = c("A549_12h_0.05%_DMSO_rep1", 
+                               "A549_12h_0.05%_DMSO_rep2",
+                               "A549_12h_0.05%_DMSO_rep3",
+                               "A549_12h_5uM_BRM014_rep1",
+                               "A549_12h_5uM_BRM014_rep2",
+                               "A549_12h_5uM_BRM014_rep3",
+                               "H1299_12h_0.05%_DMSO_rep1",
+                               "H1299_12h_0.05%_DMSO_rep2",
+                               "H1299_12h_0.05%_DMSO_rep3",
+                               "H1299_12h_5uM_BRM014_rep1",
+                               "H1299_12h_5uM_BRM014_rep2",
+                               "H1299_12h_5uM_BRM014_rep3"))
+#cellSamples <- "H1299"
+cellSamples <- c("A549", "H1299")
+#cellSamples <- "A549"
+cellSamples1 <- "martin_etal.2023"
+
+pd1 <- pd %>% 
+  separate(title, into = c("cellLine", "hour", "conC_uM", "treatment", "rep"),
+           sep = "_", remove = F)
+#tmp.meta <- fread(file = "~/Downloads/GSE198517-GPL24676_series_matrix.txt.gz",
+#             sep = "\t", header = T, quote = "", fill = T)
+
+if (all(pd1$geo_accession == colnames(c[,2:ncol(c)]))) {
+  print("names match")
+  colnames(c)[2:ncol(c)] <- pd1$title
+} else {
+  print("names do not match")
+  stop()
+}
+
+head(c)
+
+counts <- c %>% 
+  rename("ENTREZID" = "GeneID") %>% 
+  select(all_of(c("ENTREZID", pd1$title))) %>% 
+  #select(all_of(c("ENTREZID", pd1$title[1:6]))) %>% #A549
+  #select(all_of(c("ENTREZID", pd1$title[7:12]))) %>% #H1299
+  as.data.frame() %>% 
+  arrange(ENTREZID)
+  
+dim(counts)
+head(counts)
+
+#Filter gene symbols in counts to match protein coding genes in grch37
+
+#Get gene symbols
+g <- counts %>%
+  as.data.frame() %>%
+  select(ENTREZID)
+dim(g)
+head(g)
+
+#Look at known genes from grch37
+head(grch38)
+
+#Get known gene symbols from grch37
+annot <- grch38 %>%
+  as.data.frame() %>%
+  dplyr::rename("ENTREZID" = "entrez",
+                "EN_G" = "ensgene",
+                "Gene_Symbol" = "symbol")
+dim(annot)
+head(annot)
+
+#Match gene symbols from grch37 to gene symbols in counts
+
+#Get protein coding genes
+annot <- annot %>% 
+  filter(ENTREZID %in% g$ENTREZID,
+         biotype == "protein_coding") %>% 
+  arrange(ENTREZID)
+dim(annot)
+head(annot)
+
+gids <- annot %>% 
+  select(ENTREZID, Gene_Symbol) %>% 
+  unique()
+
+
+counts <- counts %>% 
+  left_join(gids, by = "ENTREZID") %>% 
+  #select(-c(ENTREZID)) %>% 
+  select(ENTREZID, Gene_Symbol, everything()) %>% 
+  filter(!Gene_Symbol == "")
+head(counts)[,1:5]
+
+#Remove NAs 
+sum(is.na(annot))
+annot2 <- na.omit(annot)
+sum(is.na(annot))
+dim(annot)
+
+annot <- annot %>% 
+  arrange(Gene_Symbol)
+
+dim(counts)
+sum(is.na(counts))
+head(counts)[,1:5]
+
+#Match gene symbols 
+counts <- counts %>%
+  filter(Gene_Symbol %in% annot$Gene_Symbol)
+head(counts)[,1:5]
+dim(counts)
+
+annot <- annot[match(counts$Gene_Symbol, annot$Gene_Symbol),]
+dim(annot)
+head(annot)
+
+
+.f = function() {
+if (all(annot$Gene_Symbol == counts$Gene_Symbol)) {
+  print("gene symbols match, saving counts matched to protein coding genes")
+  
+  setwd(dir = paste0(dir, dir1, dir2, "counts"))
+  write.table(counts, file = paste0(cellSamples1, "_raw_RNA.seq_", 
+                                    "ProteinCodingGenes_counts.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+  
+  write.table(annot, file = paste0(cellSamples1, "_ProteinCodingGenes_info.txt"),
+              sep = "\t", col.names = T, row.names = F, quote = F)
+}
+
+}
+#Read in cell annotations
+###Dataset downloaded from https://depmap.org/portal/data_page/?tab=allData
+
+
+#USE EDGER TO NORMALIZE AND FILTER COUNTS
+
+
+#Determine group size for each sample
+
+# USE EDGER TO NORMALIZE AND FILTER COUNTS
+#DETERMINE GROUP SIZE FOR EACH SAMPLE
+#rep(x, each = 3), x is number-range of cols (samples) in counts 
+# divided by 3 (triplicates) 
+#(e.g., col=36 (here, 12 samples in triplicates), 36/3=12; rep(1:12))
+
+#Create edgeR object
+
+
+#Combine duplicate gene symbols by taking the mean of probes mapped to identical
+## gene symbols
+
+#Check how many duplicate gene symbols
+p.tmp <- counts %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+#Filter for duplicates
+p.tmp1 <- p.tmp %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character()
+
+#Filter expression object for duplicates
+counts.tmp <- counts %>% 
+  filter(Gene_Symbol %in% p.tmp1) %>% 
+  select(-c(ENTREZID))
+
+#Loop through duplicates to calculate the mean
+start <- Sys.time()
+registerDoParallel(cl <- makeCluster(4))
+#i <- p.tmp1[1]
+counts.mean <- foreach(i = p.tmp1, .combine = "rbind") %dopar% {
+  print(i)
+  require(tidyverse)
+  
+  #g.tmp %>%
+  counts.tmp %>% 
+    filter(Gene_Symbol == i) %>% 
+    pivot_longer(!Gene_Symbol, names_to = "sample", values_to = "expr") %>% 
+    group_by(Gene_Symbol, sample) %>% 
+    summarize(mean = mean(expr)) %>% 
+    pivot_wider(names_from = "sample", values_from = mean)
+}
+stopCluster(cl)
+rm(cl)
+
+end <- Sys.time()
+end-start
+
+#Get genes NOT duplicated
+counts2 <- counts %>% 
+  select(-c(ENTREZID)) %>% 
+  filter(!Gene_Symbol %in% p.tmp1) %>% 
+  full_join(counts.mean, colnames(.)) %>% 
+  arrange(Gene_Symbol)
+
+head(counts2)[,1:5]
+
+
+#Confrim no duplicated genes in new data frame
+p.tmp <- counts2 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  filter(count >= 2)
+
+  annot2 <- annot %>% 
+    #select(-c(EN_G, ENTREZID)) %>% 
+    select(-c(chr, start, end, strand)) %>% 
+    unique() %>% 
+    arrange(Gene_Symbol)
+
+if (all(annot2$Gene_Symbol == counts2$Gene_Symbol)) {
+  
+  counts2 <- counts2 %>% 
+    column_to_rownames(var = "Gene_Symbol") %>% 
+    as.matrix()
+  x1 <- ncol(counts2)
+  x2 <- x1/3
+  group <- rep(1:x2, each = 3)
+  
+  y <- DGEList(counts = counts2, group = group, genes = annot2)
+  y
+  
+  y$samples$lib.size <- colSums(y$counts)
+  
+  y$samples <- y$samples %>% 
+    rownames_to_column(var = "title") %>% 
+    left_join(pd1, by = "title") %>% 
+    mutate(sample2 = title) %>% 
+    column_to_rownames(var = "sample2")
+}
+
+head(y$samples)
+
+
+
+#For graphs: Use logCPM for exploratory plots.
+##calculate mean and median cpm cutoffs
+# Any two read counts with same CPM values will also have same logCPM values.
+## Prior count avoids taking log of zero, and reduces spurious variability
+## for genes with low counts -> shrinks all inter-sample logFC-changes towards
+## zero.
+#Convert to log2-CPM. log = T will add offset to CPM values before converting
+## to log2-scale. Offset is 2/L; 2 = prior counts, L = average lib size in mill.
+## logCPM values related to CPM values by log2(CPM + 2/L). 
+
+L <- mean(y$samples$lib.size) * 1e-6 #average lib size in millions
+M <- median(y$samples$lib.size) * 1e-6
+c(L, M)
+#Minimum number of genes kept in filtering = 10 in minimum number of samples
+## (minimum number of samples based on grouping factor)
+lcpm.cutoff <- log2(10/M + 2/L) 
+nsamples <- ncol(y)
+
+#expand color palette
+col <- colorRampPalette(brewer.pal(9, "Set1"))
+
+#Look at Unfiltered logCPM
+## counts are log2(cpm + 2L) normalized
+lcpm.unfilt <- cpm(y, log = T)
+#added to cpm before log2: 2^logcpm - cpm = d; d + cpm = log2(cpm)
+cpm.unfilt <- cpm(y, log = F)
+counts.unfilt <- y$counts
+
+dim(lcpm.unfilt)
+r.lcpm.unf <- nrow(lcpm.unfilt)
+
+#Extra QC plots of unfiltered data
+#Which samples
+
+
+.f = function() {
+
+head(summary(lcpm.unfilt))[,1:5]
+
+setwd(dir = paste0(dir, "/geoData/", cellSamples1, "/figures/"))
+
+#Box plot
+tiff(file = paste(cellSamples1, cellSamples, "QC_logCPM_unfiltered_boxplot.tiff",
+                 sep = "_"), width = 10, height = 6, units = "in", res = 300)
+boxplot(lcpm.unfilt, col = col(nsamples))
+title(main="A. Raw data", xlab="Log-cpm")
+dev.off()
+
+#Density plot
+tiff(file = paste(cellSamples1, cellSamples, "QC_logCPM_unfiltered", 
+                       r.lcpm.unf, "distribution_test.tiff", sep = "_"),
+    width = 10, height = 6, units = "in", res = 300)
+
+plot(density(lcpm.unfilt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), 
+     las=2, main="", xlab="")
+title(main="Unfiltered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.unfilt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#snames <- rownames(y$samples)
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+.f = function() {
+pdf(file = paste(cellSamples1, cellSamples, "QC_unfiltered", r.lcpm.unf,
+                "gene_expression_MDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.unfilt, labels = y$samples$unique.tissueid,
+        cex = 0.7, 
+        dim.plot = c(1,2))
+title(main="Average (root-mean-square) of largest logFC changes", 
+      #xlab="Log-cpm"
+      )
+dev.off()
+}
+
+
+#Save unfiltered counts
+setwd(dir = paste0(dir, "geoData/", cellSamples1))
+
+# Save logCPM unfiltered values
+tmp <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "log2CPM.unfiltered",
+                                      r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+  
+# Save CPM unfiltered values
+tmp <- cpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "CPM.unfiltered",
+                                     r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts unfiltered values
+tmp <- counts.unfilt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "Counts.unfiltered", 
+                         r.lcpm.unf ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+
+
+#Get mean and variance relationship: use raw counts or CPM
+#summ <- counts.unfilt %>%
+summ <- cpm.unfilt %>%
+#summ <- lcpm.unfilt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "log2CPM") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(log2CPM),
+            sd = sd(log2CPM),
+            var = stats::var(log2CPM))
+plot(x = log(summ$mean, base = 2), y = log(summ$var, base = 2))
+#plot(x = summ$mean, y = summ$var)
+
+
+#Set directory for unfiltered plots
+setwd(dir = paste0(dir, "geoData/", cellSamples1, "/figures/"))
+
+#ggplot mean vs variance in log2
+tiff(file = paste(cellSamples1, cellSamples, "mean_vs_variance_counts_unfiltered.tiff", 
+                 sep = "_"), width = 6, height = 4, units = "in", res = 300)
+ggplot(summ, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+#ggplot(summ, mapping = aes(x = mean, y = var)) +
+  geom_point() +
+  #ylim(c(9.572694e-31,1.234371e+01)) +
+  #xlim(c(-3.419904, 13.456157)) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  theme_classic() +
+  labs(title = "Mean vs Variance unfiltered Counts")
+dev.off()
+
+
+} #End skip
+
+#FILER EDGER OBJECT FOR LOW EXPRESSED GENES
+
+##(e.g., median library size M = ~7 Million reads
+## 10/7 = ~1.43 - filterByExpr will keep genes with CPM
+## of 1.43 or more in at least 1 samples (no replicates here)).
+##Filter based on grouping factor of interest that will be tested. 
+## Here chose group as grouping factor
+dim(y)
+keep <- filterByExpr(y, group = y$samples$treatment)
+table(keep)
+y1 <- y[keep, , keep.lib.sizes = F]
+dim(y1)
+
+#TMM library normalization
+y1 <- calcNormFactors(y1, method = "TMM")
+
+#Look at filtered logCPM
+lcpm.filt <- cpm(y1, log = T)
+cpm.filt <- cpm(y1, log = F)
+counts.filt <- y1$counts
+
+
+#Make DF for summary statistics
+
+#Get mean and variance
+summ1 <- counts.filt %>%
+#summ1 <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Cell.ID", values_to = "counts") %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(mean = mean(counts),
+            sd = sd(counts),
+            var = var(counts))
+plot(x = log(summ1$mean, base = 2), y = log(summ1$var, base = 2))
+
+.f = function() {
+#Check var/mean relatioship
+setwd(dir = paste0(dir, "geoData/",cellSamples1, "/figures/"))
+
+tiff(file = paste(cellSamples1, cellSamples, "mean_vs_variance_counts_filtered.tiff", 
+                 sep = "_"),
+     width = 6, height = 4, units = "in", res = 300)
+ggplot(summ1, mapping = aes(x = log(mean,base = 2), y = log(var,base = 2))) +
+  geom_point() +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs")) +
+  labs(title = "Mean vs Variance filtered Counts") +
+  theme_classic()
+dev.off()
+
+q.g <- quantile(summ1$var, seq(0,1, 0.1))
+
+#Get genes with variance greater than 20% of distribution
+summ2 <- summ1 %>% 
+  filter(var >= q.g[3])
+}
+
+
+r.lcpm.filt <- nrow(lcpm.filt)
+r.lcpm.filt
+
+#Extra QC plots of filtered data
+
+.f = function() {
+
+
+head(summary(lcpm.filt))[,1:5]
+#boxplot(log2(counts.filt), col = col(nsamples))
+
+tiff(file = paste0(cellSamples1, "_QC_logCPM_filtered_boxplot.tiff"),
+      width = 6, height = 4, units = "in", res = 300)
+boxplot(lcpm.filt, col = col(nsamples))
+title(main="A. Filtered data", xlab="Log2CPM")
+dev.off()
+
+L <- mean(y1$samples$lib.size) * 1e-6 
+M <- median(y1$samples$lib.size) * 1e-6
+c(L, M)
+lcpm.cutoff <- log2(10/M + 2/L)
+
+#Plot filtered library
+tiff(file = paste(cellSamples1, cellSamples, "QC_filtered", r.lcpm.filt,
+                 "distribution.tiff", sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+plot(density(lcpm.filt[,1]), col=col(nsamples), lwd=2, ylim=c(0,0.26), las=2, 
+     main="", xlab="")
+title(main="Filtered data", xlab="Log2CPM")
+abline(v=lcpm.cutoff, lty=3)
+for (i in 2:nsamples){
+den <- density(lcpm.filt[,i])
+lines(den$x, den$y, col=col(nsamples)[i], lwd=2)
+ }
+#graphics::legend("topright", snames, text.col=col(nsamples), bty="n", cex = .6)
+dev.off()
+
+
+.f = function() {
+#plot MDS
+pdf(file = paste(cellSamples1, cellSamples, "QC_filtered", r.lcpm.filt,
+                 "gMDS_plot.pdf", 
+                 sep = "_"),
+    width = 9, height = 6)
+plotMDS(lcpm.filt, labels = y1$samples$tissue, 
+        cex = 0.7, 
+        dim.plot = c(1,2)
+        )
+title(main="Average (root-mean-square) of largest logFC changes"
+      #xlab="Log-cpm"
+      )
+dev.off()
+
+}
+
+#Plot library size
+tiff(file = paste(cellSamples1, "filtered_library_sizes.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+barplot(y1$samples$lib.size, 
+        names=y1$samples$group, 
+        ylab="Library size (Read depth)",
+        col = "grey", angle = 45)
+title("Normalize Library Size")
+abline(h=median(y1$samples$lib.size), col = "red")
+dev.off()
+
+#save filtered lib.size for integrated barplot
+t <- data.frame(y1$samples)
+
+tiff(file = paste(cellSamples1, cellSamples, "filtered_library_sizes_ggplot.tiff",
+                 sep = "_"),
+     width = 10, height = 6, units = "in", res = 300)
+ggplot(t, mapping = aes(x = title, y = lib.size, fill = treatment)) + 
+  geom_col() + 
+  theme_classic() +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(angle = 35, vjust = .5, face = "bold")) +
+  geom_hline(aes(yintercept =  median(lib.size)), color = "red") +
+  #labs(title = paste0(unique(CellLine), " Normalized libary")) +
+  theme(plot.title = element_text(hjust = .5, face = "bold")) +
+  theme(axis.text.x.bottom = element_text(size = 8, face = "bold", 
+                                          hjust = .9, vjust = .9)) +
+  theme(legend.position = "none") +
+  labs(title = paste0("normalized library"))
+dev.off()
+
+
+#SAVE metadata
+setwd(dir = paste0(dir, "geoData/", cellSamples1))
+
+#Library
+fwrite(t, file = paste(cellSamples1, cellSamples, "filtered_library_sizes.txt", 
+                            sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+
+#Save filtered counts
+#setwd(dir = paste0(dir, dir1, dir2, "/counts/filtered/"))
+
+# Save logCPM filtered values
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "log2CPM.filtered",
+                                      r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", row.names = T,col.names = T, quote = F)
+
+  
+# Save CPM filtered values
+tmp <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "CPM.filtered",
+                                     r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+# Save counts filtered values
+tmp <- counts.filt  %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol")
+
+fwrite(tmp, file = paste(cellSamples1, cellSamples, "Counts.filtered", 
+                         r.lcpm.filt ,"genes.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = T, quote = F)
+
+} #END skip
+
+#MAKE DATAFAME in long format
+tmp <- lcpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "log2CPM")
+
+tmp1 <- cpm.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "CPM")
+
+tmp2 <- counts.filt %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "title", values_to = "counts")
+
+
+b.data <- tmp %>% 
+  left_join(tmp1, by = c("Gene_Symbol", "title")) %>% 
+  left_join(tmp2, by = c("Gene_Symbol", "title")) %>% 
+  left_join(pd1, by = "title")
+head(b.data)
+dim(b.data)
+
+.f = function() {
+#SAVE DATAFRAME FOR STATISTICAL TESTING
+setwd(dir = paste0(dir, "geoData/", cellSamples1))
+fwrite(b.data, file = paste(cellSamples1, cellSamples3, "filtered", r.lcpm.filt, 
+                            "geneExpression_LongFormat.txt", sep = "_"),
+            sep = "\t", col.names = T, row.names = F, quote = F)
+
+
+b.data <- fread(file = paste0("martin_etal.2023_A549_H1299_filtered_15124_",
+                              "geneExpression_LongFormat.txt"),
+            sep = "\t", header = T, quote = "")
+} #End
+
+
+#end.all <- Sys.time()
+#end.all-start.all
+#Time difference of 1.062313 mins
+
+mycomp <- list(c("A549_DMSO_12h", "A549_BRM014_12h"),
+               c("H1299_DMSO_12h", "H1299_BRM014_12h"))
+
+g.keep <- c("IGF1R", "MAP2K1", "CASP7")
+
+c.line <- c("A549", "H1299")
+j <- c.line[1]
+i <- geneSets.oi[1]
+
+tmp3 <- b.data %>% 
+  filter(Gene_Symbol %in% g.keep)
+
+stat.test <- data.frame()
+for (j in c.line) {
+
+  for (i in g.keep) {
+  
+    print(i)
+    print(j)
+
+  tmp3.1 <- tmp3 %>% 
+    filter(Gene_Symbol == i,
+           cellLine == j)
+  if (bartlett.test(log2CPM ~ treatment, data = tmp3.1)$p.value > 0.05) {
+    print("fail to rejuect equal variance")
+  print("will assume equal variance")
+  print("using Students's t test")
+  
+  } else {
+    print("p-value is less than 0.05")
+  print("assume varaince not equal")
+  print("using Welch's t test")
+  #stop()
+   } 
+  }
+  print("done")
+}
+
+
+
+
+stat.t <- tmp3 %>% 
+  group_by(Gene_Symbol, cellLine) %>% 
+  t_test(formula = log2CPM ~ treatment, var.equal = T) %>% 
+  add_significance() %>% 
+  ungroup()
+  
+
+stat.test <- tmp3 %>% 
+    filter(Gene_Symbol %in% g.keep) %>% 
+    mutate(across(log2CPM, as.numeric)) %>% 
+    group_by(Gene_Symbol, cellLine) %>% 
+    summarise(y.position = max(log2CPM) + .5) %>% 
+  ungroup() %>% 
+  right_join(stat.t, by = c("Gene_Symbol", "cellLine")) %>% 
+  mutate(hour = "12h") %>% 
+  unite(group1, c(cellLine, group1, hour), sep = "_", remove = F) %>% 
+  unite(group2, c(cellLine, group2, hour), sep = "_", remove = F)
+
+stat.test2 <- stat.test %>% 
+  filter(Gene_Symbol %in% g.keep) %>% 
+  mutate(Gene_Symbol = ordered(Gene_Symbol, 
+                               levels = g.keep)) 
+
+#plot
+b.data %>% 
+  filter(Gene_Symbol %in% g.keep) %>% 
+  mutate(Gene_Symbol = ordered(Gene_Symbol, 
+                               levels = g.keep)) %>% 
+  #left_join(st, by = c("sample", "Gene_Symbol")) %>% 
+  mutate(title = ordered(title, levels = pd1$title)) %>% 
+  unite(sample, c("cellLine", "treatment", "hour"), sep = "_", remove = F) %>% 
+  mutate(sample = ordered(sample, levels = c(
+                                              "A549_BRM014_12h", "A549_DMSO_12h",
+                                             "H1299_BRM014_12h", "H1299_DMSO_12h"
+                                             ))) %>% 
+  ggplot(mapping = aes(x = sample, y = log2CPM)) +
+  geom_pointrange(stat = "summary", fun.min = min, fun.max = max, fun = mean,
+                  alpha = 0.5, size = .1) +
+  geom_point(mapping = aes(color = sample), size = 2,
+             position = position_jitterdodge(0.3, dodge.width = .1), 
+             alpha = .9, show.legend = T) +
+  theme_classic() +
+  facet_wrap(~Gene_Symbol, scales = "free") +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_text(size = 9, face = "bold"),
+        axis.title = element_text(size = 9, face = "bold"),
+        strip.text.x = element_text(size = 10),
+        legend.text = element_text(size = 8, face = "bold"),
+        legend.title = element_text(size = 8, face = "bold"),
+        #plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+        #panel.border = element_rect(color = "white")
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.2, "cm")
+        ) +
+  #theme(axis.text = element_text(size = 6, face = "bold", angle = 25, 
+  #                               vjust = .5, hjust = 1),
+  #      strip.text = element_text(size = 8),
+  #      strip.background = element_blank()) +
+  xlab(label = "") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.1))) +
+  stat_pvalue_manual(mapping = aes(y = log2CPM),
+                     stat.test2, 
+                     label = "p",
+                     #label = "p.signif",
+                     size = 3,
+                     tip.length = 0.03, bracket.size = .2, 
+                     hide.ns = F, coord.flip = T) +
+  #stat_compare_means(comparisons = mycomp, var.equal = F,
+  #                   method = "t.test", size = 4,
+  #                   aes(label = after_stat(p.signif)), 
+  #                   size = 3
+  #                   ) +
+  coord_flip()
+
+
+ggsave(filename = paste0(cellSamples1, "_SWI.SNF_inhibitor_AU15330",
+                         "_A549_H1299_samples_barPlot_psignif.tiff"), 
+                         #"_A549_H1299_samples_barPlot_pvals.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/", cellSamples1, "/figures"), 
+          units = "in", width = 10, height = 1.8, dpi = 300, create.dir = T)
+
+
+
+
+
+
+setwd(dir = paste0(dir = dir, dir1, "preTx2"))
+#list.files()
+preT <- fread(file = paste0("COH069_15929R_RNA_VIPER_preTx2_AllRegulonMembers_",
+                            "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_preTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+preT
+
+#Post-treatment signature
+setwd(dir = paste0(dir = dir, dir1, "postTx2"))
+#list.files()
+postT <- fread(file = paste0("COH069_15929R_RNA_VIPER_postTx2_AllRegulonMembers_",
+                             "SMARCD3_ResistantRegulon_candidates_v7.txt"),       
+            sep = "\t", header = T, quote = F) %>% 
+  select(SMARCD3) %>% 
+  rbind(list(colnames(.))) %>% 
+  rename("SMARCD3_postTxRegulonSignature" = "SMARCD3") %>% 
+  as.list()
+postT
+
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- preT %>% 
+  names()
+
+preTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- preT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  preTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+preTx
+
+#For loop to remove NA (Wrote when there are multiple signatures)
+names <- postT %>% 
+  names()
+
+postTx <- list()
+#i <- names[1]
+
+for (i in names) {
+  print(i)
+  
+  tmp.d <- postT[[i]] %>% 
+    as.data.frame() %>% 
+    rename("tmp" = ".")
+  
+  postTx[[i]] <- tmp.d[!apply(tmp.d == "", 1, all),]
+  
+  
+}
+postTx
+
+#Put  regulons into list for pre and post treatment for enrichment analysis
+pathways_mr <- list(c(preTx, postTx))
+
+names(pathways_mr) <- "SMARCD3"
+
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 "SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 "BIOCARTA_MAPK_PATHWAY")
+
+#collection <- names(pathways_mr)
+
+collection <- c("H", "C2", names(pathways_mr))
+
+#Get gene members in SMARCD3, mTOR, MAPK sigs
+system.time(
+
+gsva_mr <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  
+  if (i == collection[3]) {
+    pathways <- pathways_mr[[i]]
+  
+  #Run ssgsea
+  ssgseaP <- ssgseaParam(exprData = as.matrix(lcpm.filt), 
+                         geneSets =  pathways, minSize = 15, maxSize = 500,
+                         alpha = 0.25, normalize = T)
+  gsva(ssgseaP, verbose=TRUE)
+  } else {
+  pathways <- msigdbr(species = "Homo sapiens", category = i) %>%
+    select(gs_name, gene_symbol) %>% 
+        unique() %>%
+    group_by(gs_name)
+  
+  pathways <- split(x = pathways$gene_symbol, f = pathways$gs_name)
+  
+  ssgseaP <- ssgseaParam(exprData = as.matrix(lcpm.filt), 
+                         geneSets =  pathways, minSize = 15, maxSize = 500,
+                         alpha = 0.25, normalize = T)
+  gsva(ssgseaP, verbose=TRUE)
+  
+    }
+  }
+)
+
+
+#Elapsed time = 20.794
+
+#Look at first 5 variables in regulons element in list
+dim(gsva_mr)
+head(gsva_mr)
+
+mycomp <- list(c("A549_DMSO", "A549_BRM014"), c("H1299_DMSO", "H1299_BRM014"))
+
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 "SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 "BIOCARTA_MAPK_PATHWAY", "KEGG_MAPK_SIGNALING_PATHWAY",
+                 "REACTOME_ERK_MAPK_TARGETS", 
+                 "REACTOME_MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                 "KEGG_INSULIN_SIGNALING_PATHWAY",
+                 "REACTOME_ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                 "REACTOME_SIGNALLING_TO_RAS",
+                 "REACTOME_RAF_INDEPENDENT_MAPK1_3_ACTIVATION")
+
+gsva.tmp1 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set") %>%
+  #filter(Gene_Set %in% geneSets.oi[5:11]) %>% 
+  #mutate(Gene_Set = ordered(Gene_Set, 
+  #                          levels = geneSets.oi)) %>% 
+  pivot_longer(!Gene_Set, names_to = "title", values_to = "EnrichmentScore") %>% 
+  separate(title, into = c("cellLine", "hour", "conc", "treatment", "rep"),
+           sep = "_", remove = F) %>% 
+  unite(CellLine_Treatment, c("cellLine", "treatment"), remove = F, sep = "_") %>% 
+  mutate(CellLine_Treatment = ordered(CellLine_Treatment, 
+                                      levels = c("A549_DMSO", "A549_BRM014",
+                                                 "H1299_DMSO", "H1299_BRM014")))
+
+
+gsva.tmp2 <- gsva.tmp1 %>% 
+  group_by(Gene_Set, cellLine) %>% 
+  t_test(EnrichmentScore ~treatment, var.equal = T,
+         p.adjust.method = "fdr") %>% 
+  ungroup()
+
+gsva.tmp3 <- gsva.tmp1 %>% 
+  group_by(Gene_Set, cellLine, treatment) %>% 
+  summarise(mean = mean(EnrichmentScore)) %>% 
+  mutate(FC = abs(last(mean)/first(mean))) %>% 
+  #mutate(abs_FC = abs(FC)) %>% 
+  ungroup() 
+  
+
+gsva.tmp4 <- gsva.tmp2 %>% 
+  left_join(gsva.tmp3, by = c("Gene_Set", "cellLine")) %>% 
+  filter(p <= 0.05,
+         FC >= 1)
+
+geneSets.oi <- c("SMARCD3_preTxRegulonSignature",
+                 #"SMARCD3_postTxRegulonSignature",
+                 "HALLMARK_PI3K_AKT_MTOR_SIGNALING",
+                 #"BIOCARTA_MAPK_PATHWAY", "KEGG_MAPK_SIGNALING_PATHWAY",
+                 #"REACTOME_ERK_MAPK_TARGETS", 
+                 #"REACTOME_MAP3K8_TPL2_DEPENDENT_MAPK1_3_ACTIVATION",
+                 #"KEGG_INSULIN_SIGNALING_PATHWAY",
+                 #"REACTOME_ACTIVATED_TAK1_MEDIATES_P38_MAPK_ACTIVATION",
+                 #"REACTOME_SIGNALLING_TO_RAS",
+                 #"REACTOME_RAF_INDEPENDENT_MAPK1_3_ACTIVATION",
+                 "BIOCARTA_ERK_PATHWAY",
+                 #"REACTOME_GASTRIN_CREB_SIGNALLING_PATHWAY_VIA_PKC_AND_MAPK",
+                 "PACHER_TARGETS_OF_IGF1_AND_IGF2_UP",
+                 #paste0("REACTOME_REGULATION_OF_INSULIN_LIKE_GROWTH_FACTOR_",
+                #        "IGF_TRANSPORT_AND_UPTAKE_BY_INSULIN_LIKE_GROWTH_",
+                #        "FACTOR_BINDING_PROTEINS_IGFBPS"),
+                 "MULLIGAN_NTF3_SIGNALING_VIA_INSR_AND_IGF1R_UP",
+                 #"REACTOME_REGULATION_OF_INSULIN_SECRETION",
+                 "BILD_HRAS_ONCOGENIC_SIGNATURE")
+
+gsva.tmp1 %>% 
+  filter(Gene_Set %in% geneSets.oi#[10:16]
+         ) %>% 
+  #filter(Gene_Set == "SMARCD3_preTxRegulonSignature") %>% 
+  ggplot(mapping = aes(x = CellLine_Treatment, y = EnrichmentScore)) +
+  geom_violin(mapping = aes(fill = treatment, color = treatment),
+              width = 0.5, alpha = .6, show.legend = T) +
+  #geom_boxplot(mapping = aes(fill = treatment),
+  #             alpha = 0.2, width = 0.3, color = "grey", show.legend = F) +
+  geom_point(size = 1,
+             #position = position_jitterdodge(0.4, dodge.width = .1), 
+             alpha = .9, show.legend = F) +
+  theme_classic() +
+  #theme_bw() +
+  #scale_fill_manual(values = mycolors) +
+  facet_wrap(~Gene_Set, scales = "free", ncol = 3) +
+  #facet_grid(cellLine~Gene_Set, scales = "free") +
+  theme(
+        axis.text.y = element_text(size = 7, face = "bold"),
+        axis.text.x = element_text(size = 6, face = "bold", 
+                                   angle = 20, vjust = .5),
+        strip.text = element_text(size = 5.8, face = "bold", hjust = 0.5),
+        axis.title.y.left = element_text(size = 7, face = "bold"),
+        legend.text = element_text(size = 6, face = "bold"),
+        legend.title = element_text(size = 7, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        panel.spacing.x = unit(.5, "cm"),
+        legend.key.size = unit(.5, "lines")) +
+  #facet_grid(Tx_TimePoint2 ~ Gene_Set, scales = "free") + +
+  stat_compare_means(
+    #comparisons = list(c("A549_DMSO", "A549_BRM014")),                 
+    comparisons = mycomp,
+                     method = "t.test",
+                     method.args = list(var.equal = T), 
+                     aes(label = after_stat(p.signif)),
+                     label = "p.format"
+                     ) +
+  ylab("ssGSEA score") +
+  xlab("") +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.2))) +
+  scale_x_discrete(expand = c(.2,.2,.2,.2)) 
+
+ggsave(filename = paste0(cellSamples1, "_SWI.SNF_inhibitor_AU15330_",
+                         "_A549_H1299_samples_ssGSEA_SMARCD3preTx_MAPK_IGF1R_Sigs.tiff"), 
+                         #"_A549_H1299_samples_ssGSEA_SMARCD3preTxSig_pvals.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/", cellSamples1, "/figures"), 
+          units = "in", width = 8, height = 3.5, dpi = 300, create.dir = T)
+
+
+
+
+
+
+
+gsva.tmp2 <- gsva_mr %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Set")%>% 
+  filter(Gene_Set == "SMARCD3_postTxRegulonSignature")
+
+
+
+
+
+
+
+
+
+
+
+collection <- c("H","C2")
+
+system.time(
+
+pathways.all <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  msigdbr(species = "Homo sapiens", category = i) %>%
+    select(gs_name, gene_symbol) %>% 
+    unique() %>% 
+    mutate(collection = i)
+  
+  }
+)
+
+
+#Make heatmap with for loop
+#i <- geneSets.oi[2]
+
+for (i in geneSets.oi) {
+  print(i)
+  
+  if (i == "SMARCD3_preTxRegulonSignature") {
+    top.merg <- preTx[[i]]
+  } else if (i == "SMARCD3_postTxRegulonSignature") {
+    top.merg <- postTx[[i]]
+  } else { 
+    top.merg <- pathways.all %>% 
+      filter(gs_name == i) %>% 
+      pull(gene_symbol) %>% 
+      unique() %>% 
+      as.character()
+  }
+
+#Look at genes in specific signature
+heat1 <- counts2[rownames(counts2) %in% top.merg, ]
+
+.f = function() {
+c <- heat1[,grepl(pattern = "A549_", colnames(heat1))]
+c2 <- t(scale(t(c)))
+c2 <- c2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+m <- heat1[,grepl(pattern = "H1299_", colnames(heat1))]
+m2 <- t(scale(t(m)))
+m2 <- m2 %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+#Merge and select row column order
+heat2 <- c2 %>%
+  left_join(m2, by = "Gene_Set") %>%
+  #left_join(t2, by = "Gene_Set") %>%
+  column_to_rownames(var = "Gene_Set") %>%
+  as.data.frame() %>%
+  select(all_of(c(pd1$title))) %>%
+  as.matrix()
+}
+
+heat2 <- t(scale(t(heat1))) %>% 
+  na.omit() %>% 
+  as.data.frame() %>% 
+  as.matrix()
+
+#ex4 <- 2^ex3[,2:ncol(ex3)]
+#heat2 <- ex4[rownames(ex4) %in% top.merg, ]
+
+
+#Get row names and genes
+tmp <- rownames(heat2) %>% 
+  as.data.frame() %>% 
+  rename("Gene" = ".") %>% 
+  #separate(gs, into = c("g1", "g2"), remove = F, extra = "merge", sep = "_") %>% 
+  rownames_to_column(var = "rn")
+
+#Get T/F matrix of gene set positions in heatmap
+top.merg1 <- rownames(heat2) %in% top.merg
+
+#Make data frame of T/F and gene sets to be labeled
+tmp. <- data.frame(is.annotated = top.merg1,
+                   Gene = rownames(heat2),
+                   gs = i)
+
+
+#Set colors for meta phenotype/gene sets
+tmp.3 <- tmp. %>%
+  rownames_to_column(var = "rn") %>% 
+  left_join(tmp, by = "Gene") %>%
+  dplyr::filter(is.annotated == "TRUE") %>%
+  dplyr::mutate(color = ifelse(gs == geneSets.oi[1],  "#8B5A00",
+                      ifelse(gs ==  geneSets.oi[2], "rosybrown2",
+                      ifelse(gs == geneSets.oi[3],  "cyan4",
+                      ifelse(gs == geneSets.oi[4], "#4A1486",
+                      #ifelse(gs %in% INFLAMMATION, "orchid2",
+                      #ifelse(gs %in% LYSOSOME, "#006400",
+                      #ifelse(gs %in% METABOLISM, "lightpink3",
+                      #ifelse(gs %in% CELL_SURFACE_MARKERS, "deeppink3",
+                               "" #))))
+                               ))))) %>%
+  pull(color) %>%
+  as.character()
+
+assign(paste0(i, "_1"), rownames(heat2) %in% top.merg)
+
+
+fsize <- 10
+width <- 2
+
+#PICK COLOR FOR HEATMAP
+ramp <- colorRamp(c("darkred", "lightblue", "black"))
+ramp.list <- rgb(ramp(seq(0, 1, length = 10)), max = 255)
+ramp.list
+#barplot(rep(1, 10), axes = FALSE, space = 0, col = ramp.list)
+#dark.red <- "#800000"
+white.grey <- "#FFFFFF" #white
+light.blue <- "#B6DCE8" #light blue
+dark.red <- "#8B0000"#read
+myCol <- colorRampPalette(c(light.blue, white.grey, dark.red))(100)
+myBreaks <- seq(-1.2, 1.2, length.out=101)
+
+state.df <- heat2
+#colnames(state.df)  <- c(rep("DMSO", 2), rep("SWI/SNFi", 8), rep("DMSO", 2),
+#                         rep("SWI/SNFi", 4), rep("DMSO", 2), rep("SWI/SNFi", 4),
+#                         rep("DMSO", 2))
+
+colnames(state.df)  <- c(rep("DMSO", 3), rep("SWI/SNFi", 3)
+                         #rep("DMSO", 3), rep("SWI/SNFi", 3)
+                         )
+
+#names.s <- colnames(heat2)
+#state.df.factor <- factor(colnames(state.df), 
+#                          levels = names.s)
+
+
+cells.df <- heat2
+colnames(cells.df) <- c(
+                        #rep("A459", 6)
+                        rep("H1299", 6)
+                        )
+
+
+#MAKE LEGENDS FOR CELL LINES, TREATMENT, AND STATE
+column_ha <- HeatmapAnnotation(
+                               CellLines = colnames(cells.df),
+                               Treatment = colnames(state.df),
+                               #SWI_SNFi = state.df.factor
+                               col = list(Treatment  = c(
+                                 "DMSO" = "blue",
+                                 "SWI/SNFi" = "purple"),
+                                 CellLines = c("A459" = "yellow",
+                                            "H1299" = "brown3")))
+#plot heatmap
+hmapGSEA <- Heatmap(heat2,
+                    top_annotation = column_ha,
+                    column_title_gp = gpar(fontsize = 5),
+                    row_title_gp = gpar(fontsize = 5),
+                    show_column_names = T,
+                    cluster_columns = F) +
+  rowAnnotation(link = anno_mark(at = which(top.merg1), 
+        labels = rownames(heat2)[top.merg1], 
+        labels_gp = gpar(fontsize = 9, col = tmp.3, fontface = "bold"),
+        padding = unit(1, "mm")),
+        annotation_name_rot = 45) +
+  Heatmap(get(paste0(i, "_1")) + 0,
+          name = i, col = c("0" = "white", "1" = unique(tmp.3)),
+          show_heatmap_legend = F, width = unit(width, "mm"),
+          column_names_gp = gpar(fontsize = fsize, col = unique(tmp.3),
+                                 fontface = "bold"), column_names_rot = 30)
+
+
+#Save plots
+setwd(dir = paste0(dir, "geoData/"))
+
+#Save heatmap with annotations
+tiff(file = paste0("martin_etal2023", i, 
+                   #"_A459_",
+                   "_H1299_",
+                   "geneMembers.tiff"), 
+     width = 10, height = 17, units = "in", res = 300)
+ht_list <- ComplexHeatmap::draw(hmapGSEA,
+        heatmap_legend_side = "left",
+        merge_legends = T,
+        )
+dev.off()
+  
+} #End loop
+
+```
+

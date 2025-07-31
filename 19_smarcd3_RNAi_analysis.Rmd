@@ -1,0 +1,618 @@
+---
+title: "jordan_etal.2013 SMARCD3 RNAi analysis"
+output: html_document
+date: "2025-07-15"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#LOAD LIBRARIES
+library(plyr)
+library(ggrepel)
+library(ggpubr)
+library(ggplot2)
+library(cowplot)
+library(data.table)
+library(foreach)
+library(kableExtra)
+library(conflicted)
+library(scales)
+library(GEOquery)
+library(impute)
+library(ComplexHeatmap)
+library(siggenes)
+library(msigdbr)
+library(rstatix)
+library(topGO)
+library(ggpattern)
+library(samr)
+library(gprofiler2)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+batch <- "COH069"
+sample <- "15929R_RNA"
+prefix <- paste(batch, sample, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+cellSamples1 <- "gdsc1_2013_data"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/mTOR_everolimus_resistance/")
+dir1 <- "geoData/"
+dir2 <- "pharmacogenomicsDataSets/gdsc_data/"
+```
+
+```{r}
+#EXAMINE JORDAN et al. 2013 MICROARRAY DATA WITH SMARCD3 KD
+.f = function() {
+#Lod data
+gset <- getGEO("GSE40145", GSEMatrix =TRUE, getGPL=T)
+
+#Get expression matrix
+ex <- gset$GSE40145_series_matrix.txt.gz@assayData$exprs
+head(ex)[1:4]
+
+#Get feature matrix
+genes <- gset$GSE40145_series_matrix.txt.gz@featureData@data
+
+genes1 <- genes %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "num") %>% 
+  slice(20:nrow(.))
+  #filter(!`Gene Symbol` == "")
+head(genes1)
+
+#Get metadata
+meta <- gset$GSE40145_series_matrix.txt.gz@phenoData@data
+
+meta1 <- meta %>% 
+  select(title, geo_accession, `cell type:ch2`, `reference:ch1`)
+
+#Get smarcd3 geo ids
+sm.ids <- meta1 %>% 
+  filter(grepl(pattern = "SMARCD3", title)) %>% 
+  pull(geo_accession) %>% 
+  as.character()
+
+#Get index of gene symbols
+genes1.1 <- genes1 %>% 
+  select(num, `ORF_LIST`) %>% 
+  rename("Gene_Symbol" = "ORF_LIST")
+
+#all(genes1.1$num == ex1$num)
+
+#get genes and smarcd3 kd samples
+ex1 <- ex %>% 
+  as.data.frame() %>% 
+  select(all_of(sm.ids)) %>% 
+  rownames_to_column(var = "num") %>% 
+  slice(20:nrow(.)) %>% 
+  #filter(num %in% genes1$num) %>% 
+  left_join(genes1.1, by = "num") %>% 
+  select(-c(num)) %>% 
+  select(Gene_Symbol, everything()) %>% 
+  filter(!Gene_Symbol == "")
+  #mutate(Gene_Symbol = ifelse(Gene_Symbol == "IGF2|INS-IGF2", "IGF2",
+  #                     ifelse(Gene_Symbol == "IGF2;INS-IGF2;IGF2;INS-IGF2", "IGF2",
+  #                            Gene_Symbol)))
+
+head(ex1)
+
+#Check range of values for each samples
+s.names <- ex1 %>% 
+  colnames()
+
+for (i in s.names[2:7]) {
+  print(i)
+  
+  print(range(ex1[[i]]))
+}
+
+
+#Check how many duplicate gene symbols
+p.tmp <- ex1 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character()
+
+#Filter expression object for duplicates
+ex1.tmp <- ex1 %>% 
+  filter(Gene_Symbol %in% p.tmp)
+
+start <- Sys.time()
+ex1.mean <- foreach(i = p.tmp, .combine = "rbind") %do% {
+  print(i)
+  
+  #g.tmp %>%
+  tmp <- ex1.tmp %>% 
+    filter(Gene_Symbol == i) %>% 
+    pivot_longer(!Gene_Symbol, names_to = "sample", values_to = "expr") %>% 
+    group_by(sample) %>% 
+    summarize(mean = mean(expr)) %>% 
+    #summarize(mean = sum(expr)) %>% 
+    pivot_wider(names_from = "sample", values_from = mean) %>% 
+    mutate(Gene_Symbol = i) %>% 
+    select(Gene_Symbol, everything())
+}
+
+end <- Sys.time()
+end-start
+#Time difference of 2.886061 mins
+
+#Get genes NOT duplicated
+ex2 <- ex1 %>% 
+  filter(!Gene_Symbol %in% p.tmp) %>% 
+  full_join(ex1.mean, colnames(.))
+
+#Confrim no duplicated genes in new data frame
+p.tmp.confirm <- ex2 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+head(ex2)
+dim(ex2)
+
+
+#Save microarray expression matrix
+setwd(dir = paste0(dir, dir1, "jordan_etal.2013/"))
+fwrite(ex2, file = paste0("jordin_etal_2013_MicroArrayGeneExpression.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+} #END SKIP
+
+
+#Load microarray expression matrix 
+## Fluorescent array image intensity data fo Cy3 and Cy5 channels were
+## Lowess-normalized and then log2 ratio was taken.
+setwd(dir = paste0(dir, dir1, "jordan_etal.2013/"))
+ex2 <- fread(file = paste0("jordin_etal_2013_MicroArrayGeneExpression.txt"),
+       sep = "\t", header = T, quote = "")
+
+ex3 <- ex2 %>% 
+  column_to_rownames(var = "Gene_Symbol") %>% 
+  as.matrix()
+
+head(ex3)
+dim(ex3)
+
+#
+#plotMDS(ex3)
+#plot(density(ex3[,1:5]))
+
+#Plot SMARCD3 expression to confirm RNAi of SMARCD3 KD
+
+g1 <- "SMARCD3"
+
+tmp <- ex3 %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  filter(Gene_Symbol %in% g1) %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Sample", 
+               values_to = "log2RatioIntensity") %>% 
+  mutate(RNAi = c("RNAi_1", "RNAi_1", "RNAi_3", "RNAi_3", "RNAi_2", "RNAi_2"),
+         Rep = rep(1:2, each = 1, length.out = 6),
+         CellLine = "HMEC",
+         Sample = ordered(Sample, levels = c("GSM946028", "GSM946029",
+                                             "GSM946032", "GSM946033",
+                                             "GSM946030", "GSM946031"))) %>% 
+  mutate_at(vars(RNAi, CellLine, Rep), factor)
+
+tmp1 <- tmp %>% 
+  group_by(RNAi) %>% 
+  summarise(SMARCD3_expression = mean(log2RatioIntensity),
+            sd = sd(log2RatioIntensity)) %>% 
+  mutate(RepsCombined = c("GSM946028/29", "GSM946032/33", "GSM946030/31"),
+         Gene_Symbol = "SMARCD3") %>% 
+  mutate(RepsCombined = ordered(RepsCombined, levels = c("GSM946028/29", "GSM946032/33",
+                                             "GSM946030/31"))) %>% 
+  left_join(tmp, by = c("RNAi", "Gene_Symbol"))
+
+tmp1 %>% 
+  ggplot(mapping = aes(x = RepsCombined)) +
+  geom_bar(mapping = aes(y = SMARCD3_expression, fill = RNAi), 
+                 stat = "identity", width = 0.8, show.legend = T,
+                 position = position_dodge(width = 0.75)) +
+        geom_point(mapping = aes(y = log2RatioIntensity), 
+                   show.legend = F, size = 1.5,
+                   position = position_dodge(width = 0.75)) +
+        geom_errorbar(mapping = aes(ymin = SMARCD3_expression - sd, 
+                                    ymax = SMARCD3_expression + sd),
+                      width = 0.1, position = position_dodge(width = 0.75)) +
+  #geom_col_pattern(mapping = aes(pattern = Rep, fill = RNAi)) +
+  #geom_col(mapping = aes(y = SMARCD3_expression, fill = RNAi) ) +
+  #geom_point(mapping = aes(y = log2RatioIntensity, color = log2RatioIntensity)) +
+  
+  #geom_errorbar(mapping = aes(ymin = SMARCD3_expression - sd,
+  #                            ymax = SMARCD3_expression + sd)) +
+  theme_classic() +
+  #scale_pattern_manual(values = c("1" = "stripe", "2" = "circle")) +
+  scale_fill_manual(values = c("darkgoldenrod3", "chartreuse3", "brown3")) +
+  labs(title = "SMARCD3 RNAi") +
+  ylab(label = "SMARCD3 expression (log2 ratio intensity)") +
+  xlab(label = " ") +
+  theme(axis.text.x.bottom = element_text(size = 9, face = "bold", 
+                                          angle = 20, vjust = 1, hjust = 0.9),
+        axis.title.x.bottom = element_text(size = 10, face = "bold", 
+                                           margin = margin(t = 5)),
+        axis.text.y.left = element_text(size = 9, face = "bold"),
+        axis.title.y.left = element_text(size = 11, face = "bold"),
+        legend.title = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 9, face = "bold"),
+        plot.title = element_text(size = 11, face = "bold", hjust = .5)) +
+  guides(pattern = guide_legend(override.aes = 
+                               list(
+                                 pattern = c("stripe", "circle"),
+                                 pattern_spacing = .03,
+                                 pattern_angle = c(45, 0),
+                                 pattern_color = "white"
+                                 )),
+         fill = guide_legend(override.aes = list(pattern = "none")))
+
+#SKIP
+.f = function() {  
+ggsave(filename = paste0("jordan_etal.2013_SMARCD3_RNAiKD_SMARCD3expression",
+                         #"_geom_col_Plot.tiff"), 
+                         "_geom_col_Plot_v3.tiff"), 
+         device = "tiff", path = paste0(dir, dir1, "jordan_etal.2013/figures"), 
+          units = "in", width = 4, height = 3.6, dpi = 300, create.dir = T)
+} #END SKIP
+
+#One-class SAM (samr)
+
+#Prepare data
+
+#patients.smarcd3_kd <- colnames(ex3)
+
+#
+tmp.expr <- ex3 %>% 
+  as.data.frame()
+
+tmp.expr2 <- tmp.expr %>% 
+  remove_rownames() %>% 
+  as.matrix()
+
+#reference level
+y <- rep(1, ncol(tmp.expr2))
+
+#Make samr.data list object
+sam.data <- list(x = tmp.expr2,
+                 y = y,
+                 geneid = as.character(1:nrow(tmp.expr2)),
+                 genenames = rownames(tmp.expr),
+                 logged2 = T)
+
+samr.obj <- samr(data = sam.data,
+                 resp.type = "One class",
+                 assay.type = "array",
+                 center.arrays = F,
+                 nperms = 100, # Number of permutations for FDR estimation
+                 random.seed = 71525)
+
+#Select delta threshold (sensitivity/specificity)
+delta.table <- samr.compute.delta.table(samr.obj)
+samr.plot(samr.obj, delta.table[,1])
+c.names.tmp <- colnames(delta.table)
+c.names.tmp2 <- str_replace_all(string = c.names.tmp, pattern = " ", 
+                                replacement = "_")
+
+#Save delta table from one-class SAM
+setwd(paste0(dir, dir1, "jordan_etal.2013/"))
+fwrite(as.data.frame(delta.table), 
+       file = "jordan_etal2013_AllSamples_OneClassSAM_DeltaTable.txt",
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Get delta using pvalue <= 0.05 
+delta.tmp <- delta.table %>% 
+  as.data.frame() %>% 
+  setnames(c.names.tmp2) %>% 
+  filter(`90th_perc_FDR` <= 0.05) %>% 
+  select(delta) %>% 
+  slice(1) %>% 
+  pull(delta) %>% 
+  as.numeric()
+
+#Get pvalue for corresponding delta
+fdr.tmp <- delta.table %>% 
+  as.data.frame() %>% 
+  setnames(c.names.tmp2) %>% 
+  filter(`90th_perc_FDR` <= 0.05) %>% 
+  slice(1) %>% 
+  pull(`90th_perc_FDR`) %>%
+  as.numeric() %>% 
+  round(digits = 4)
+
+#delta <- ""
+siggenes.table <- samr.compute.siggenes.table(samr.obj, 
+                                              del = delta.tmp, 
+                                              data = sam.data, 
+                                              delta.table = delta.table)
+
+
+#Gets up: (upregulated genes did not show functional enrichment)
+x.up <- siggenes.table$genes.up %>% 
+  as.data.frame() %>% 
+  select("Gene ID") %>% 
+  rename("Gene_Symbol" = "Gene ID") %>% 
+  head(n = 0)
+
+#Downregulated genes did show MAPK/insulin pathways
+x.lo <- siggenes.table$genes.lo %>% 
+  as.data.frame() %>% 
+  rename("qValue" = `q-value(%)`) %>%
+  #filter(qValue <= 0.05) %>% 
+  #arrange(qValue) %>% 
+  select("Gene ID") %>% 
+  rename("Gene_Symbol" = "Gene ID") #%>% 
+  #head(n = 0)
+
+top <- x.up %>% 
+  full_join(x.lo, by = "Gene_Symbol")
+
+#library(gprofiler2)
+gostres <- gost(query = c(top$Gene_Symbol), 
+                organism = "hsapiens", ordered_query = FALSE, 
+                multi_query = FALSE, significant = TRUE, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = FALSE, 
+                user_threshold = 0.05, correction_method = "fdr", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE, highlight = TRUE)
+
+
+names(gostres)
+
+dim(gostres$result)
+#head(gostres$result, 3)
+tmp <- gostres$result
+
+#Get mapk and insulin pathways to label on plot
+tmp.terms1 <- tmp[grepl("MAPK", tmp$term_name),] %>% 
+  pull(term_id) %>% 
+  as.character()
+
+#Get mapk and insulin pathways to label on plot
+tmp.terms2 <- tmp[grepl("JNK", tmp$term_name),] %>% 
+  pull(term_id) %>% 
+  as.character()
+
+tmp.terms3 <- tmp[grepl("insulin", tmp$term_name),] %>% 
+  pull(term_id) %>% 
+  as.character()
+
+tmp.terms4 <- tmp[grepl("apoptotic", tmp$term_name),] %>%
+  slice(1) %>% 
+  pull(term_id) %>% 
+  as.character()
+
+#combine
+tmp.terms <- c(tmp.terms1, tmp.terms2, tmp.terms3, tmp.terms4)
+
+#Make plot and save
+p <- gostplot(gostres, capped = F, interactive = F)
+p
+
+pp <- publish_gostplot(p, highlight_terms = c(tmp.terms), 
+                       width = NA, height = NA, filename = NULL )
+pp +
+  labs(title = "SMARCD3 RNAi functional Enrichment") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) 
+
+#ggsave(filename = paste0("jordan_etal.2013_Top500GenesDnRegulated_SMARCD3_KD_",
+ggsave(filename = paste0("jordan_etal.2013_SAM.oneClass_", nrow(x.lo), 
+                         "_DnRegulatedGenes_SMARCD3.RNAi.KD_",
+                         "AllSamples_gprofilerAnalysis_manhattanPlot.tiff"), 
+         device = "tiff", path = paste0(dir, "geoData/jordan_etal.2013/figures"), 
+          units = "in", width = 6, height = 5, dpi = 300, create.dir = T)
+
+gpData <- p$data
+
+setwd(paste0(dir, dir1, "jordan_etal.2013/"))
+fwrite(gpData, file = paste0("jordan_etal.2013_delta_", round(delta.tmp, digits = 4), 
+                             "_deltaPvalue_", fdr.tmp, 
+                             "_SAM.oneClass_DnRegulatedGenes_SMARCD3.RNAi.KD",
+                             "_gprofilerFunctionalEnrichmentResults.txt"), 
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+
+
+#Correlation plot between SMARCD3 and genes of interest
+names <- c("SMARCD3_RNAi_1.1", "SMARCD3_RNAi_1.2", "SMARCD3_RNAi_3.1", 
+           "SMARCD3_RNAi_3.2", "SMARCD3_RNAi_2.1", "SMARCD3_RNAi_2.2")
+
+#Genes of interest to correlate with SMARCD3
+g1 <- "SMARCD3"
+g2 <- c("IGF2", "IGF1R", "MAP2K1", "MAP2K2", "MAPK3", "MAPK1", "CASP7", "CDKN1A")
+g3 <- 8
+#i <- "IGF1R"
+
+for (i in g2) {
+  print(i)
+#}
+
+mean.tmp1 <- ex3 %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  #filter(Gene_Symbol %in% c(g1, g2[g3])) %>% 
+  filter(Gene_Symbol %in% c(g1, i)) %>% 
+  column_to_rownames(var = "Gene_Symbol") %>% 
+  setNames(names) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OrigID") %>% 
+  separate(OrigID, into = c("RNAi", "Rep"), extra = "merge", sep = "[.]", remove = F) %>% 
+  group_by(RNAi) %>% 
+  summarise("mean1" = mean(get(g1)))
+
+mean.tmp2 <- ex3 %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Gene_Symbol") %>% 
+  #filter(Gene_Symbol %in% c(g1, g2[g3])) %>% 
+  filter(Gene_Symbol %in% c(g1, i)) %>% 
+  column_to_rownames(var = "Gene_Symbol") %>% 
+  setNames(names) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "OrigID") %>% 
+  separate(OrigID, into = c("RNAi", "Rep"), extra = "merge", sep = "[.]", remove = F) %>% 
+  group_by(RNAi) %>% 
+  #summarise("mean2" = mean(get(g2[g3])))
+  summarise("mean2" = mean(get(i)))
+
+
+#names.mean <- c("RNAi", g1, g2[g3])
+names.mean <- c("RNAi", g1, i)
+
+mean.tmp3 <- mean.tmp1 %>% 
+  left_join(mean.tmp2, by = "RNAi") %>% 
+  setNames(names.mean) %>% 
+  mutate(CellLine = "HMEC")
+
+mean.tmp3 %>% 
+  #ggplot(mapping = aes(x = get(g1), y = get(g2[g3]))) +
+  ggplot(mapping = aes(x = get(g1), y = get(i))) +
+  geom_point(mapping = aes(color = RNAi), size = 2.5, show.legend = F) +
+  stat_cor(method = "pearson", alternative = "two.sided", cor.coef.name = "R", 
+           label.y.npc = "top", label.x.npc = "center", size = 3) +
+  theme_classic() +
+  scale_color_manual(values = c("darkgoldenrod3", "chartreuse3", "brown3")) +
+  xlab(label = paste0(g1, " expression")) +
+  #ylab(label = paste0(g2[g3], " mean log2RatioIntensity")) +
+  ylab(label = paste0(i, " expression")) +
+  geom_smooth(method = "lm", se = F, colour = "lightgrey", alpha = .1, linewidth = .5) +
+  theme(
+        axis.title = element_text(size = 11, face = "bold"),
+        axis.text = element_text(size = 9, face = "bold"),
+        legend.text = element_text(size = 5, face = "bold"),
+        legend.title = element_text(size = 5, face = "bold"),
+        axis.line = element_line(linewidth = 1)
+        )
+
+ggsave(filename = paste0("jordan_etal.2013_RNAiSMARCD3samples_correlationBetween",
+                         "SMARCD3and",i,"_pearsonCorPlot_v2.tiff"),
+       device = "tiff", path = paste0(dir, "geoData/jordan_etal.2013/figures"), 
+          units = "in", width = 2.5, height = 2, dpi = 300, create.dir = F)
+
+
+
+
+}
+
+
+
+
+#Correlation between pvals and SMARCD3 expression in RNAi samples
+
+
+#PERFORM PEARSON CORRELATION BETWEEN AUC AND ENRICHMENT SCORES
+
+
+
+
+
+#Perform Pearson correlation
+names <- "SMARCD3"
+
+ex2.1 <- ex2 %>% 
+  filter(Gene_Symbol %in% names) %>% 
+  select(Gene_Symbol, GSM946028) %>% 
+  pivot_longer(!Gene_Symbol, names_to = "Sample", values_to = "log2RatioIntensity")
+
+gs_keep <- gpData %>% 
+  filter(term_id %in% tmp.terms) %>% 
+  pull(term_name) %>%
+  as.character() %>% 
+  unique()
+
+tmp.gp <- gpData %>% 
+  as.data.frame() %>% 
+  filter(term_id %in% tmp.terms) %>% 
+  select(term_name, logpval) %>% 
+  mutate(Sample = "GSM946028") %>% 
+  left_join(ex2.1, by = "Sample")
+
+#i <- "SMARCD3"
+#j <- gs_keep[1]
+
+d.list <- list()
+#set.seed(1122)
+system.time(
+for (i in names ) {
+  for (j in gs_keep) {
+    
+    print(i)
+    print(j)
+    tmp.d1 <- tmp.gp %>% 
+    filter(Gene_Symbol == i#,
+           #term_name == j
+           )
+    d.list[[j]][[i]] <- cor.test(tmp.d1$log2RatioIntensity, tmp.d1$logpval,
+                     method = "pearson")
+  }
+}
+) 
+#elapsed time = 3.738 seconds
+
+#Extract pearson correlation results
+corTest <- list()
+
+#For loop
+system.time(
+
+for (i in names) {
+  for (j in gs_keep) {
+  print(i)
+  print(j)
+  tmp1 <- d.list[[j]]
+  tmp <- tmp1[[i]]
+  corTest[[j]][[i]] <- data.frame("Pearson_cor" = tmp$estimate,
+                            "pvalue" = tmp$p.value,
+                            "t" = tmp$statistic,
+                            "df" = tmp$parameter,
+                            "method" = tmp$method,
+                            "alternative" = tmp$alternative,
+                            "Gene_Set" = j,
+                            "DRUG_NAME" = i)
+  }
+}
+)
+#Elapsed time = 0.274
+
+
+#Correct for FDR based on each gene set
+corTest_df <- list()
+
+
+for (j in gs_keep) {
+  print(j)
+  
+  corTest_df[[j]] <- ldply(corTest[[j]], .id = NULL) %>% 
+    add_column(fdr = p.adjust(.$pvalue, method = "BH"), .before = "pvalue") %>% 
+    add_column(fwer = p.adjust(.$pvalue, method = "bonferroni"), 
+               .before = "pvalue") %>% 
+    as.data.frame()
+}
+
+
+corTest_df1 <- ldply(corTest_df, .id = NULL) %>% 
+  select(Gene_Set, DRUG_NAME, everything())
+
+
+head(corTest_df1)
+
+
+
+```

@@ -1,0 +1,1547 @@
+---
+title: "MR-inverter drug GDSC2 expr data + everSamples MR regulon: ssGSEA and AUC data"
+author: "Eric Medina"
+date: "2024-02-19"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#LOAD LIBRARIES
+library(affyio)
+library(affy)
+library(plyr)
+library(impute)
+library(hgu219.db)
+library(ggplot2)
+library(data.table)
+library(foreach)
+library(doParallel)
+library(parallel)
+library(GO.db)
+library(org.Hs.eg.db)
+library(org.Sc.sgd.db)
+library(org.Mm.eg.db)
+library(msigdbr)
+library(kableExtra)
+library(GSEABase)
+library(GSVA)
+library(conflicted)
+library(ggforce)
+library(scales)
+library(tidyverse)
+conflict_prefer_all(winner = "dplyr", quiet = T)
+
+#Treatment
+treatments <- "everolimus"
+
+#Batch
+sample <- "COH069_15929R"
+type <- "bulk_RNA"
+prefix <- paste(sample, type, sep = "_")
+
+#Which samples
+cellSamples <- "everSamples"
+
+#Main directory
+dir <- paste0("~/COH069/15929R_RNA/redo/treatments/", 
+              "everolimus/integrated.model/")
+
+dir2 <- paste0("/aracne_viper_results/mr_inverter_drug_analysis/orcestra")
+dir3 <- "/gdsc2_2020_data"
+```
+
+```{r}
+#Pre-treatment
+setwd(paste(dir, "aracne_viper_results/preTreatment", sep = "/"))
+lead.mrs3.pre <- fread(file = paste0("leading_edge_viper_TOP_TMR_candidtes.txt"),
+            sep = "\t", header = T, quote = F)
+#Post-treatment
+setwd(paste(dir, "aracne_viper_results/postTreatment", sep = "/"))
+lead.mrs3.post <- fread(file = paste0("leading_edge_viper_TOP_TMR_candidtes_",
+            "postTreatment.txt"),
+            sep = "\t", header = T, quote = F)
+
+#Get SMARCD3 regulon for pre and post treatment
+preT <- lead.mrs3.pre %>% 
+  select(SMARCD3) %>% 
+  rbind(list("SMARCD3")) %>% 
+  rename("SMARCD3_regulon_preTx" = "SMARCD3") %>% 
+  as.list()
+
+postT <- lead.mrs3.post %>% 
+  select(SMARCD3) %>% 
+  rbind(list("SMARCD3")) %>% 
+  rename("SMARCD3_regulon_postTx" = "SMARCD3") %>% 
+  as.list()
+
+#Put SMARCD3 regulon into list for pre and post treatment for enrichment analysis
+pathways_mr <- list("SMARCD3_regulons" = c(preT, postT))
+
+#GET PATHWAYS AND GENE MEMBERS
+collection <- c("SMARCD3_regulons")
+```
+
+```{r}
+.f = function() {
+#READ IN GENOMICS IN DRUG SENSITIVITY IN CANCER (GDSC2) DATA AND SAVE AS TXT
+#data has 969 cell lines and 288 drugs
+
+setwd(dir = paste0(dir, "aracne_viper_results/", 
+                   "mr_inverter_drug_analysis/gdsc_data/"))
+
+#Read in dose response data data
+#Dataset downloaded from https://www.cancerrxgene.org/downloads/drug_data
+tmp <- fread(file = "PANCANCER_IC_Wed Feb 28 01_32_48 2024.csv",
+             header = T)
+
+tmp <- tmp %>% 
+  rename("Drug" = "Drug Name",
+         "CellLine"= "Cell Line Name",
+         "LN_IC50" = "IC50")
+head(tmp)
+#Save as txt file
+fwrite(tmp, file = "gdsc2_ic50_auc.txt", sep = "\t", row.names = F, 
+       col.names = T, quote = F)
+
+
+#Read in second file found with MOA info
+#Dataset downloaded from https://www.cancerrxgene.org/downloads/bulk_download
+## (GDSC2-dataset)
+tmp1 <- openxlsx::read.xlsx(xlsxFile = "GDSC2_fitted_dose_response_27Oct23.xlsx")
+
+tmp1 <- tmp1 %>% 
+  rename("Drug" = "DRUG_NAME",
+         "CellLine" = "CELL_LINE_NAME")
+head(tmp1)
+
+#Save as txt
+fwrite(tmp1, file = "gdsc2_ic50_auc_v2.txt", sep = "\t", row.names = F,
+       col.names = T, quote = F)
+
+
+#Read in cell line info
+tmp3 <- fread("GDSC2_public_raw_data_27Oct23.csv")
+
+tmp3 <- tmp3 %>% 
+  rename("CellLine" = "CELL_LINE_NAME")
+head(tmp3)
+#Save as txt
+fwrite(tmp3, file = "gdsc_cellLine_annotation.txt", sep = "\t", row.names = F,
+       col.names = T, quote = F)
+
+
+#Read in Cell line details
+tmp4 <- openxlsx::read.xlsx(xlsxFile = "Cell_Lines_Details.xlsx")
+
+tmp4 <- tmp4 %>% 
+  rename("CellLine" = "Sample.Name")
+head(tmp4)
+
+#Save as txt
+fwrite(tmp4, file = "gdsc_Cell_Lines_Details.txt", sep = "\t", row.names = F,
+       col.names = T, quote = F)
+}
+```
+```{r}
+drugs <- tmp %>% pull(Drug) %>% as.character() %>% unique()
+drugs1 <- tmp1 %>% pull(DRUG_NAME) %>% as.character() %>% unique()
+tmp.c <- tmp$`Cell Line Name` %>% unique()
+tmp.c1 <- tmp1$CELL_LINE_NAME %>% unique()
+
+drugs3 <- c(drugs, drugs1) %>% 
+  as.data.frame() %>% 
+  rename("drugs" = ".") %>% 
+  group_by(drugs) %>% 
+  summarise(count = n())
+
+#Same cell lines
+all(unique(tmp$CellLine) %in% unique(tmp1$CellLine))
+all(unique(tmp1$CellLine) %in% unique(tmp$CellLine))
+
+#tmp has two more drugs than tmp1
+all(unique(tmp$Drug) %in% unique(tmp1$Drug))
+all(unique(tmp1$Drug) %in% unique(tmp$Drug))
+
+```
+
+```{r}
+#FOUND MULTIPLE DRUG RESULTS FOR AUC/IC50 FOR SOME DRUGS
+
+.f = function() {
+#Read in 
+setwd(dir = paste0(dir, "aracne_viper_results/", 
+                   "mr_inverter_drug_analysis/gdsc_data/"))
+tmp <- fread(file = "gdsc2_ic50_auc.txt", sep = "\t", header = T, quote = "")
+
+head(tmp)
+#Two different datasets for Docetaxel
+tmp.g5 <- tmp %>%
+  dplyr::group_by(Drug, CellLine) %>%
+  dplyr::summarise(n = n()) %>% 
+  filter(n >=2) %>% 
+  pull(Drug) %>% 
+  as.character() %>% 
+  unique()
+
+#Confrim drug names with two drug IDs
+tmp_1 <- tmp %>% filter(Drug == tmp.g5[3])
+table(tmp_1$`Drug ID`)
+
+#Register cluter for loop
+registerDoParallel(cl <- makeCluster(4))
+
+#i <- tmp.g5[1]
+start <- Sys.time()
+
+#For loop to upadate names of dugs at second occurrence
+tmp1 <- foreach(i = tmp.g5, .combine = "rbind") %dopar% {
+  require(tidyverse)
+  tmp %>% 
+    filter(Drug == i) %>% 
+    mutate(Drug = ifelse(`Drug ID` == unique(.$`Drug ID`)[2],
+                              paste0(Drug, "_v2"), Drug))
+}
+
+#Close cluster
+stopCluster(cl)
+rm(cl)
+
+end <- Sys.time()
+end - start
+#Time difference of 2.333352 secs
+
+#Remove drugs with duplicated names and replace with updated names
+tmp2 <- tmp %>% 
+  filter(!Drug %in% tmp.g5) %>% 
+  full_join(tmp1, by = colnames(.))
+head(tmp2)
+
+#Save as txt file
+fwrite(tmp2, file = "gdsc2_ic50_auc_v3.txt", sep = "\t", row.names = F, 
+       col.names = T, quote = F)
+}
+```
+
+```{r}
+.f = function() {
+  
+#TIDY GDSC2 DATA (FOUND TWO DATASETS WITH IDENTICAL IC50/AUC - ONE HAS 
+## ADDITIONAL MOA INFO)
+
+setwd(dir = paste0(dir, "aracne_viper_results/", 
+                   "mr_inverter_drug_analysis/gdsc_data/"))
+
+#Read in dose response data 
+
+#First data set
+tmp <- fread(file = "gdsc2_ic50_auc_v3.txt", sep = "\t", header = T, quote = "")
+
+head(tmp)
+
+#Read in data set with target info
+tmp1 <- fread(file = "gdsc2_ic50_auc_v2.txt", sep = "\t", header = T, quote = "")
+
+head(tmp1)
+
+#Select info to Merge
+tmp1 <- tmp1 %>% 
+  select("Drug", "PUTATIVE_TARGET", "PATHWAY_NAME") %>% 
+  unique()
+
+#Merge two data sets
+if(all(tmp1$Drug %in% tmp$Drug) == "TRUE") {
+  print("Merge two data sets")
+  tmp2 <- tmp %>% 
+    left_join(tmp1, by = "Drug", relationship = "many-to-many") 
+} else {
+    print("do not merge")
+}
+
+head(tmp2)
+
+#Select data order
+tmp2 <- tmp2 %>% 
+  rename("DataSet" = "Dataset Version",
+         "Drug_ID" = "Drug ID",
+         "Cosmic_ID" = "Cosmic ID",
+         "TCGA_Class" = "TCGA Classification",
+         "Tissue_SubType" = "Tissue Sub-type",
+         "Z_Score" = "Z score") %>% 
+  select(-c("Max Conc")) %>% 
+  select(DataSet, Drug, Drug_ID, LN_IC50, Z_Score, AUC, RMSE, PUTATIVE_TARGET,
+         PATHWAY_NAME, CellLine, Cosmic_ID, Tissue, Tissue_SubType, TCGA_Class)
+head(tmp2)
+
+#Save
+setwd(dir = paste0(dir, "aracne_viper_results/", 
+                   "mr_inverter_drug_analysis/gdsc_data/"))
+
+fwrite(tmp2, "gdsc2_drug_ic50_auc_v4.txt", sep = "\t", row.names = F, 
+       col.names = T, quote = F)
+  
+tmp2 <- fread(file ="gdsc2_drug_ic50_auc_v4.txt", sep = "\t", 
+              header = T, quote = "")
+head(tmp2)
+}
+```
+
+```{r}
+.f = function() {
+  
+#DOWNLOADED RAW GDCS2 EXPRESSION DATA SETS (.CEL FILES)
+#https://www.cancerrxgene.org/downloads/bulk_download
+
+#READ IN AND PROCESSES ALL .CEL FILES FOR GDSC2 DATA
+setwd(paste0(dir, "aracne_viper_results/mr_inverter_drug_analysis/orcestra/gdsc2_2020_data/", 
+            "gdsc2_expressionData/"))
+
+data <- ReadAffy()
+sampleNames(data)
+n <- length(data)
+
+#Perform RMA normalization
+eset.rma <- rma(data)
+g1.exprs <- exprs(eset.rma)
+head(g1.exprs)[,1:5]
+
+#Add column to save
+gdsc2.expr <- g1.exprs %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "hgu219")
+head(gdsc2.expr)[,1:5]
+
+#Save
+fwrite(gdsc2.expr, file = "gdsc2_exprs_rma.Normalized.txt", sep = "\t", row.names = F,
+       col.names = T, quote = F)
+
+#gdsc2.expr <- fread(file = "gdsc2_exprs_rma.Normalized.txt", sep = "\t", header = T, quote = "")
+#head(gdsc2.expr)[,1:5]
+dim(gdsc2.expr)
+
+#Check if there are multiple identical probe names
+p.tmp <- gdsc2.expr %>% 
+  select(hgu219) %>% 
+  group_by(hgu219) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+
+#Save probe names to convert to gene symbols using david
+p.tmp <- gdsc2.expr %>% 
+  select(hgu219) 
+
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/",
+            sep = "/"))
+fwrite(p.tmp, file = "hgu219_probe_id.txt", sep = "\t", row.names = F,
+       col.names = F, quote = F)
+}
+```
+
+```{r}
+#MAP HGU219 PROBE NAMES TO GENE SYBMOLS AND ALSO MAP CEL FILE SAMPLES NAMES TO
+## CELL LINE SAMPLE NAMES
+
+#GDSC2 expression data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "gdsc2_expressionData/",sep = "/"))
+gdsc2.expr <- fread(file = "gdsc2_exprs_rma.Normalized.txt", header = T, sep = "\t",
+             quote = "")
+head(gdsc2.expr)[,1:5]
+
+#Convert hgu219 probe names to gene symbols (uploaded hgu219 probe names to 
+## DAVID and returned official gene symbols)
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            sep = "/"))
+p.tmp1 <- fread(file = "david_hgu219_to_geneSymbol.txt", header = T, sep = "\t",
+                quote = "")
+p.tmp1 <- p.tmp1 %>% 
+  arrange(From) %>% 
+  rename("hgu219" = "From",
+         "Gene_Symbol" = "To") %>% 
+  select(hgu219, Gene_Symbol)
+
+#Match gdsc2 expr to ghu219 probe names recognized by David (those with a 
+## respective gene symbol)
+gdsc2.expr <- gdsc2.expr %>% 
+  filter(hgu219 %in% p.tmp1$hgu219)
+
+#Merge gene conversion file with gdsc2 expr and keep only gene symbols
+if (all(p.tmp1$From == gdsc2.expr$hgu219)) {
+  print("merge dataframes")
+  
+  gdsc2.expr <- gdsc2.expr %>% 
+    left_join(p.tmp1, by = "hgu219") %>% 
+    select(-hgu219) %>% 
+    select(Gene_Symbol, everything())
+    
+} else {
+  print("do not merge")
+}
+
+#Combine duplicate gene symbols by taking the mean of probes mapped to identical
+## gene symbols
+
+#Check how many duplicate gene symbols
+p.tmp <- gdsc2.expr %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+#Filter for duplicates
+p.tmp1 <- p.tmp %>% 
+  filter(count >= 2) %>% 
+  pull(Gene_Symbol) %>% 
+  as.character()
+
+#Filter expression object for duplicates
+gdsc2.expr.tmp <- gdsc2.expr %>% 
+  filter(Gene_Symbol %in% p.tmp1)
+
+#Loop through duplicates to calculate the mean
+start <- Sys.time()
+registerDoParallel(cl <- makeCluster(4))
+
+gdsc2.mean <- foreach(i = p.tmp1, .combine = "rbind") %do% {
+  print(i)
+  require(tidyverse)
+  
+  #g.tmp %>%
+  gdsc2.expr.tmp %>% 
+    filter(Gene_Symbol == i) %>% 
+    pivot_longer(!Gene_Symbol, names_to = "sample", values_to = "expr") %>% 
+    group_by(Gene_Symbol, sample) %>% 
+    summarize(mean = mean(expr)) %>% 
+    pivot_wider(names_from = "sample", values_from = mean)
+}
+stopCluster(cl)
+rm(cl)
+
+end <- Sys.time()
+end-start
+
+#Get genes NOT duplicated
+gdsc2.expr2 <- gdsc2.expr %>% 
+  filter(!Gene_Symbol %in% p.tmp1) %>% 
+  full_join(gdsc2.mean, colnames(.))
+
+#Confrim no duplicated genes in new data frame
+p.tmp <- gdsc2.expr2 %>% 
+  select(Gene_Symbol) %>% 
+  group_by(Gene_Symbol) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count))
+
+head(gdsc2.expr2)[,1:5]
+
+#Map CEL file names to cell lines
+
+#Read in gdsc2 file containing sample to cell line info
+s.tmp <- fread(file = "gdsc2_sample.to.data_info.txt", sep = "\t", header = T,
+               quote = "")
+
+s.tmp <- s.tmp %>% 
+  select("CellLine", "Array Data File") %>% 
+  rename("Sample" = "Array Data File") %>% 
+  arrange(Sample)
+head(s.tmp)
+
+#Confrim order and replace colnames with respective cell line
+if (all(s.tmp$Sample == colnames(gdsc2.expr2)[2:ncol(gdsc2.expr2)])) {
+  print("replace colnames")
+  
+  gdsc2.expr2 <- gdsc2.expr2 %>% 
+    column_to_rownames(var = "Gene_Symbol") %>% 
+    rename_with(~s.tmp$CellLine, all_of(colnames(.))) %>% 
+    rownames_to_column(var = "Gene_Symbol")
+  
+} else {
+  print("do not replace colnames")
+}
+
+head(gdsc2.expr2)[,1:5]
+
+.f = function() {
+#Save
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "gdsc2_expressionData/",sep = "/"))
+fwrite(gdsc2.expr2, file = "gdsc2_exprs_rma.Normalized_processed.txt",
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Read in Normalized/Processed expression matrix
+gdsc2.expr2 <- fread(file = "gdsc2_exprs_rma.Normalized_processed.txt",
+       sep = "\t", header = T, quote = "")
+head(gdsc2.expr2)[,1:5]
+dim(gdsc2.expr2)
+}
+```
+
+```{r}
+#CALCULATE ENRICHMENT SCORE WITH GDSC2 EXPRESSION DATA AND SMARCD3 REGULON
+## PHENOTYPE.
+#PERFORM KNN IMPUTATION ON MISSING AUC DATA. THEN PLOT
+
+#Read in normalized and tidy'd gdsc2 data
+setwd(paste0(dir, dir2, dir3, "/gdsc2_expressionData/"))
+#list.files()
+gdsc2.expr2 <- fread(file = "gdsc2_exprs_rma.Normalized_processed.txt",
+       sep = "\t", header = T, quote = "")
+head(gdsc2.expr2)[,1:5]
+dim(gdsc2.expr2)
+
+gdsc2.expr2 <- gdsc2.expr2 %>% 
+  column_to_rownames(var = "Gene_Symbol") 
+head(gdsc2.expr2)[,1:5]
+
+
+
+#registerDoParallel(cl <- makeCluster(4))
+
+start <- Sys.time()
+
+gsva_mr_gdsc2 <- foreach(i = collection) %do% {
+  print(i)
+  pathways <- pathways_mr[[i]]
+  require(tidyverse)
+  require(msigdbr)
+  require(GSVA)
+  
+  #Run ssgsea
+  gsva(expr = as.matrix(gdsc2.expr2), gset.idx.list =  pathways,
+                method="ssgsea",  min.sz = 15, max.sz = 500, verbose=TRUE, 
+                kcdf="Gaussian", parallel.sz=1L, mx.diff = T,
+                tau = 0.25, ssgsea.norm = T)
+}
+end <- Sys.time()
+end - start
+#Time difference of 17.11922 secs
+
+#stopCluster(cl)
+#rm(cl)
+
+#Insert column names
+names(gsva_mr_gdsc2) <- collection
+
+#c.names <- gdsc2.expr2 %>% colnames() %>% as.data.frame()
+#Split list based on collection
+gsva.H <- gsva_mr_gdsc2$SMARCD3_regulons %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+.f = function() {
+#Save scores
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+fwrite(gsva.H, file = paste("gdsc2_ssGSEA.Scores_SMARCD3_regulons.txt",
+                                  sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+gsva.H <- fread(file = paste("gdsc2_ssGSEA.Scores_SMARCD3_regulons.txt",
+                                  sep = "_"),
+       sep = "\t", header = T, quote = "")
+}
+
+#Put into list for loop
+gsva.tmp <- list("SMARCD3_regulons" = gsva.H)
+
+#Make dataframe in long format
+registerDoParallel(cl <- makeCluster(4))
+
+start <- Sys.time()
+
+gsva.data.all <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  #require(tidyverse)
+  gsva.tmp[[i]] %>% 
+    as.data.frame() %>% 
+    pivot_longer(! Gene_Set, names_to = "CellLine", 
+               values_to = "ssGSEA_Score") %>%
+    mutate(collection = i) %>% 
+    separate(Gene_Set, into = c("MR", "treatment_time"), sep = "_", remove = F,
+             extra = "merge") %>% 
+    select(Gene_Set, ssGSEA_Score, CellLine, MR, treatment_time) %>% 
+    mutate_at(vars(Gene_Set, CellLine, MR, treatment_time), factor) %>% 
+    mutate_at(vars(ssGSEA_Score), as.numeric)  
+
+}
+end <- Sys.time()
+end - start
+#Time difference of 0.1400921 secs
+
+stopCluster(cl)
+rm(cl)
+
+head(gsva.data.all)
+
+#Read in auc data
+setwd(paste0(dir, dir2, "/gdsc2_2020_data/"))
+gdsc.drug <- fread(file = "gdsc2_drug_ic50_auc_v4.txt", sep = "\t", 
+                  header = T,
+            quote = "")
+
+head(gdsc.drug)
+length(unique(gdsc.drug$Drug))
+#Get AUC data and put into matrix for imputation
+gdsc.auc <- gdsc.drug %>%
+  as.data.frame() %>% 
+  select(CellLine, Drug, AUC) %>% 
+  pivot_wider(names_from = "CellLine", values_from = "AUC") %>% 
+  column_to_rownames(var = "Drug") %>% 
+  as.matrix() 
+
+head(gdsc.auc)[,1:5]
+
+#Perform knn imputation
+gdsc.auc.knn <- impute.knn(t(gdsc.auc))
+
+#Pull out imputation data from list object created by knn imputation
+gdsc2.knn.data <- gdsc.auc.knn$data
+head(gdsc2.knn.data)[,1:5]
+
+.f = function() {
+#Save AUC knn imputation data
+
+  tmp <- gdsc2.knn.data %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "CellLine")
+head(tmp)[,1:5]
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/",
+            sep = "/"))
+fwrite(tmp, file = "gdsc2_AUC_knn.Imputation_dataframe.txt", sep = "\t", 
+       row.names = F, col.names = T, quote = F)
+
+#Read in AUC knn imputation data
+gdsc2.knn.data <- fread(file = "gdsc2_AUC_knn.Imputation_dataframe.txt", 
+                        sep = "\t", header = T, quote = "")
+}
+
+#Transform into longFormat
+gdsc2.knn.data1 <- gdsc2.knn.data %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "CellLine") %>% 
+  pivot_longer(!CellLine, names_to = "Drug", values_to = "AUC")
+
+head(gdsc2.knn.data1)
+
+#Add drug and cell line info
+tmp <- gdsc.drug %>% 
+  select(CellLine, Tissue, Tissue_SubType, TCGA_Class) %>% 
+  unique()
+
+tmp1 <- gdsc.drug %>% 
+  select(Drug, PUTATIVE_TARGET, PATHWAY_NAME) %>% 
+  unique()
+
+#Merge exp, auc data, drug info
+gdsc2_expr_auc <- gsva.data.all %>% 
+  left_join(gdsc2.knn.data1, by = "CellLine", relationship = "many-to-many") %>% 
+  left_join(tmp, by = "CellLine") %>% 
+  left_join(tmp1, by = "Drug") %>% 
+  select(treatment_time, Gene_Set, MR, ssGSEA_Score, CellLine, Tissue, Tissue_SubType,
+         TCGA_Class, Drug, AUC, everything())
+
+head(gdsc2_expr_auc)
+
+.f = function() {
+#Save scores and auc data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+fwrite(gdsc2_expr_auc, file = paste0("gdsc2_AUC.data_ssGSEA_scores_SMARCD3_", 
+                                   "regulon_LongFormat.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Read in score and auc data (SMARCD3 regulon)
+gdsc2_expr_auc <- fread( file = paste0("gdsc2_AUC.data_ssGSEA_scores_SMARCD3_", 
+                                   "regulon_LongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+}
+```
+```{r}
+#IDENTIFY MR-INVERTER ANTI-CANCER DRUGS ANALYSIS USING GDSC DATASET AND 
+## SMARCD3 REGULON PHENOTYPE
+
+#Read in score and auc data (SMARCD3 regulon)
+setwd(paste0(dir, dir2, dir3, "/ssGSEA/"))
+gdsc2_expr_auc <- fread( file = paste0("gdsc2_AUC.data_ssGSEA_scores_SMARCD3_", 
+                                   "regulon_LongFormat.txt"),
+       sep = "\t", header = T, quote = "", na.strings = c("", "NA"))
+
+head(gdsc2_expr_auc)
+
+#Perform correlation
+names <- gdsc2_expr_auc %>% 
+  pull(Drug) %>% 
+  unique() %>% 
+  as.character() %>% 
+  na.omit()
+
+gs_keep <- c("SMARCD3_regulon_preTx", "SMARCD3_regulon_postTx")
+
+i <- names[1]
+j <- gs_keep[1]
+
+d.list <- list()
+set.seed(1122)
+system.time(
+for (i in names ) {
+  for (j in gs_keep) {
+    
+  
+  
+    print(i)
+    print(j)
+    tmp.d1 <- gdsc2_expr_auc %>% 
+    filter(Drug == i,
+           Gene_Set == j)
+    d.list[[j]][[i]] <- cor.test(tmp.d1$ssGSEA_Score, tmp.d1$AUC,
+                     method = "pearson")
+  }
+}
+) 
+#elapsed time = 2.117 seconds
+
+#Extract pearson correlation results
+gdsc2_corTest <- list()
+
+#For loop
+system.time(
+
+for (i in names) {
+  for (j in gs_keep) {
+  print(i)
+  print(j)
+  tmp1 <- d.list[[j]]
+  tmp <- tmp1[[i]]
+  gdsc2_corTest[[j]][[i]] <- data.frame("Pearson_cor" = tmp$estimate,
+                            "pvalue" = tmp$p.value,
+                            "t" = tmp$statistic,
+                            "df" = tmp$parameter,
+                            "method" = tmp$method,
+                            "alternative" = tmp$alternative,
+                            "Gene_Set" = j,
+                            "Drug" = i)
+  }
+}
+)
+#Elapsed time = 0.238 seconds
+
+tmp <- gdsc.drug %>% 
+  select(Drug, DataSet, Drug_ID, PUTATIVE_TARGET, PATHWAY_NAME)
+
+tmp1 <- ldply(gdsc2_corTest$SMARCD3_regulon_preTx, .id = NULL) %>% 
+  add_column(fdr = p.adjust(.$pvalue, method = "BH"), .before = "pvalue") 
+  
+tmp2 <- ldply(gdsc2_corTest$SMARCD3_regulon_postTx, .id = NULL) %>% 
+  add_column(fdr = p.adjust(.$pvalue, method = "BH"), .before = "pvalue") 
+
+#Merge
+gdsc2_corTest_df.auc <- tmp1 %>% 
+  full_join(tmp2, by = colnames(.)) %>% 
+  select(Gene_Set, Drug, Pearson_cor, fdr, pvalue, everything()) %>% 
+  arrange(Gene_Set, Pearson_cor) %>% 
+  left_join(tmp, by = "Drug", relationship = "many-to-many") %>% 
+  unique() %>% 
+  arrange(Gene_Set, Pearson_cor)
+  
+
+head(gdsc2_corTest_df.auc)
+
+.f = function() {
+#Save
+setwd(paste0(dir, dir2, dir3))
+#fwrite(gdsc2_corTest_df.auc, file = paste0("gdsc2_auc_COH069.everSamples.SMARCD3.",
+#                                       "ssGSEA.Scores_Pearson_correlations.txt"),
+#     sep = "\t", row.names = F, col.names = T, quote = F)
+
+gdsc2_corTest_df.auc <- fread(file = paste0("gdsc2_auc_COH069.everSamples.SMARCD3.",
+                                       "ssGSEA.Scores_Pearson_correlations.txt"),
+     sep = "\t", header = T, quote = "")
+head(gdsc2_corTest_df.auc)
+}
+
+#Filter for pvalue
+gdsc2_corTest_df1.auc <- gdsc2_corTest_df.auc %>% 
+  filter(fdr <= 0.05)
+
+#Plot
+#library(viridis)
+
+gs_keep <- c("SMARCD3_regulon_preTx", "SMARCD3_regulon_postTx")
+
+#Top pearson correlations
+tx.df <- gdsc2_corTest_df1.auc %>%
+  filter(Pearson_cor <= 0) %>% 
+  #filter(Pearson_cor >= 0) %>% 
+  #arrange(fdr) %>%
+  #filter(Gene_Set %in% gs_keep[1]) %>% 
+  filter(Gene_Set %in% gs_keep[2]) %>% 
+  arrange(Pearson_cor)
+
+head(tx.df)
+
+tx <- tx.df %>% 
+  #slice_head(n = 24) %>% 
+  pull(Drug) %>% 
+  as.character() %>% 
+  unique()
+
+#tx <- "Rapamycin"
+#tx <- "Daporinad"
+tx <- c("Acetalax", "Bortezomib", "CDK9_5038", "CDK95576", "Dactinomycin_v2",  
+        "Obatoclax Mesylate", "Navitoclax", "Sabutoclax", "Staurosporine", 
+        "Vincristine")
+
+tx <- c("Sepantronium bromide", "Ruxolitinib")
+i <- c("Sepantronium bromide", "Ruxolitinib")
+tx <- c("VTP-B")
+
+tmp.gg <- gdsc2_expr_auc %>% 
+  #filter(Gene_Set %in% gs_keep[1],
+  filter(Gene_Set %in% gs_keep[2],
+         #Drug == tx[8])
+         Drug %in% tx) 
+
+tmp.gg %>% 
+#gdsc2_expr_auc %>%
+  filter(Tissue == "breast",
+         Drug == "Rapamycin") %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  #geom_point(mapping = aes(color = Tissue),
+  geom_point(mapping = aes(color = CellLine), 
+             size = 2.6, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  facet_wrap(~Drug, scales = "free") +
+  #facet_wrap_paginate(~Drug, ncol = 4, nrow = 3, page = 1, scales = "free") +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1)) +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  labs(title = unique(tmp.gg$Gene_Set)) +
+    scale_color_manual(values = hex)
+  #+
+  #guides(color = "none")
+.f = function() {
+ggsave(filename = paste0("gdsc2.AUC_SMARCD3.regulon.preTx_Top9.tiff"), 
+#ggsave(filename = paste0("gdsc2.AUC_SMARCD3.regulon.preTx_Sepantronium_Rux.Only.tiff"), 
+#ggsave(filename = paste0(i, "_gdsc2.AUC_SMARCD3.regulon.postTx_Sepantronium_Rux.Only.tiff"),
+              device = "tiff", 
+       path = paste0(dir, dir2, dir3, 
+                     "/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor.preTx"),
+                     #"/figures_gdsc2.AUC_SMARCD3.regulon.postTx"),
+                    units = "in", width = 12, height = 10, dpi = 300)
+}
+
+col.tmp <- tmp.gg %>% 
+  filter(Tissue == "breast") %>% 
+  pull(CellLine) %>% 
+  unique() %>% 
+  length()
+  
+hex <- hue_pal()(50)
+x <- length(unique(tmp.gg$Drug))/12
+x <- round(x, 0)
+
+for (i in 1:x) {
+  print(i)
+  
+  tmp.gg %>% 
+  filter(Tissue == "breast") %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  geom_point(mapping = aes(color = CellLine), 
+             size = 2.6, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  #facet_wrap(~Drug, scales = "free") +
+  facet_wrap_paginate(~Drug, ncol = 4, nrow = 3, page = i, scales = "free") +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1)) +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  labs(title = unique(tmp.gg$Gene_Set)) +
+    scale_color_manual(values = hex)
+  
+  #ggsave(filename = paste0(i, "_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_preTx.tiff"),  
+  ggsave(filename = paste0(i, "_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_postTx.tiff"), 
+                device = "tiff",
+       path = paste0(dir, dir2, dir3, 
+                     #"/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_preTx"),
+                    #"/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_postTx_v2"),
+                    "/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_postTx_BreastOnly_v2"), 
+                    units = "in", width = 14, height = 10, dpi = 300)
+}
+
+
+#just Breast cancer cell lines
+x <- length(unique(tmp.gg$Drug))/12
+x <- round(x, 0)
+
+for (i in 1:x) {
+  print(i)
+  
+  tmp.gg %>% 
+  filter(Tissue == "breast") %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  #geom_point(mapping = aes(color = Tissue), 
+  geom_point(mapping = aes(color = CellLine), 
+             size = 2, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  facet_wrap_paginate(~Drug, ncol = 4, nrow = 3, page = i, scales = "free") +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1)) #+
+  #guides(color = "none")
+  
+  #ggsave(filename = paste0(i, "_gdsc2.BreastOnly.AUC_SMARCD3.regulon.preTx.tiff"), 
+  ggsave(filename = paste0(i, "_gdsc2.BreastOnly.AUC_SMARCD3.regulon.postTx.tiff"),
+                   device = "tiff", 
+       path = paste0(dir, dir2, dir3, 
+                     #"/figures_gdsc2.AUC_SMARCD3.regulon.preTx"),
+                     "/figures_gdsc2.AUC_SMARCD3.regulon.postTx"),
+                    units = "in", width = 12, height = 10, dpi = 300)
+}
+
+tmp.gg %>% 
+  filter(ssGSEA_Score > 1.8, 
+         Drug == "Dabrafenib", 
+         Tissue == "breast")
+tmp.gg %>% 
+  filter(ssGSEA_Score > 1.8, 
+         AUC < 0.6,
+         Tissue == "breast")
+  
+tx <- tmp.gg %>% 
+  filter(ssGSEA_Score > 1.8, 
+         AUC < 0.6,
+         Tissue == "breast") %>% 
+  pull(Drug) %>% 
+  as.character()
+tx <- c(tx, "Rapamycin")
+  
+tmp.gg %>% 
+  filter(Tissue == "breast",
+         Drug %in% tx) %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  geom_point(mapping = aes(color = CellLine), 
+             size = 3, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  #facet_wrap(~Drug, scales = "free") +
+  facet_wrap_paginate(~Drug, ncol = 3, nrow = 3, page = 1, scales = "free") +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1),
+        legend.text = element_text(size = 12)) +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  labs(title = unique(tmp.gg$Gene_Set)) +
+    scale_color_manual(values = hex) +
+  theme(strip.text.x = element_text(size = 14))
+  
+  #ggsave(filename = paste0(i, "_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_preTx.tiff"),  
+  ggsave(filename = paste0(i, "_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_BreastOnly_topDrugs_postTx.tiff"), 
+                device = "tiff",
+       path = paste0(dir, dir2, dir3, 
+                     #"/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_preTx"),
+                    #"/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_postTx_v2"),
+                    "/figures_gdsc2.AUC_SMARCD3.regulon_PearsonNegCor_postTx_BreastOnly_v2"), 
+                    units = "in", width = 14, height = 10, dpi = 300)
+  
+
+hex <- hue_pal()(4)
+#Look at smarcd3 expression in du 4475 cells
+gdsc2.expr2 %>% 
+  select(Gene_Symbol, `CAMA-1`, MCF7, T47D, "DU-4475") %>% 
+  filter(Gene_Symbol == "SMARCD3") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "CellLine", 
+               values_to = "GeneExpression") %>% 
+  ggplot(mapping = aes(x = CellLine, y = GeneExpression)) +
+  geom_point(mapping = aes(color = CellLine), 
+             size = 3, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  facet_wrap(~Gene_Symbol, scales = "free") +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1),
+        legend.text = element_text(size = 12)) +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  labs(title = unique(tmp.gg$Gene_Set)) +
+  scale_color_manual(values = hex) +
+  theme(strip.text.x = element_text(size = 14))
+
+ggsave(filename = paste0("gdsc2_SMARCD3.Expression_cama1_du4475_mcf7_t47d.tiff"), 
+                device = "tiff",
+       path = paste0(dir, dir2, dir3), 
+                    units = "in", width = 7, height = 5, dpi = 300)
+```
+
+```{r}
+#CALCULATE ENRICHMENT SCORE WITH GDSC2 EXPRESSION DATA AND ALL MR REGULON
+## PHENOTYPE.
+#PERFORM KNN IMPUTATION ON MISSING AUC DATA. THEN PLOT
+
+#Read in normalized and tidy'd gdsc2 data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "gdsc2_expressionData/",sep = "/"))
+
+gdsc2.expr2 <- fread(file = "gdsc2_exprs_rma.Normalized_processed.txt",
+       sep = "\t", header = T, quote = "")
+
+
+gdsc2.expr2 <- gdsc2.expr2 %>% 
+  column_to_rownames(var = "Gene_Symbol") %>% 
+  as.matrix()
+head(gdsc2.expr2)[,1:5]
+
+registerDoParallel(cl <- makeCluster(4))
+
+start <- Sys.time()
+
+gsva_mr_gdsc2 <- foreach(i = collection) %dopar% {
+  print(i)
+  pathways <- pathways_mr[[i]]
+  require(tidyverse)
+  require(msigdbr)
+  require(GSVA)
+  
+  #Run ssgsea
+  gsva(expr = as.matrix(gdsc2.expr2), gset.idx.list =  pathways,
+                method="ssgsea",  min.sz = 15, max.sz = 500, verbose=TRUE, 
+                kcdf="Gaussian", parallel.sz=1L, mx.diff = T,
+                tau = 0.25, ssgsea.norm = T)
+}
+end <- Sys.time()
+end - start
+#Time difference of 17.2155 secs
+
+stopCluster(cl)
+rm(cl)
+
+#Insert column names
+names(gsva_mr_gdsc2) <- collection
+
+#Split list based on collection
+gsva.H <- gsva_mr_gdsc2$MR_regulons %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "Gene_Set")
+
+.f = function() {
+#Save scores
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+fwrite(gsva.H, file = paste("gdsc2_ssGSEA.Scores_ALL_MR_regulons.txt",
+                                  sep = "_"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+gsva.H <- fread(file = paste("gdsc2_ssGSEA.Scores_ALL_MR_regulons.txt",
+                                  sep = "_"),
+       sep = "\t", header = T, quote = "")
+}
+
+#Put into list for loop
+gsva.tmp <- list("MR_regulons" = gsva.H)
+
+#Make dataframe in long format
+registerDoParallel(cl <- makeCluster(4))
+
+start <- Sys.time()
+
+gsva.data.all <- foreach(i = collection, .combine = "rbind") %do% {
+  print(i)
+  #require(tidyverse)
+  gsva.tmp[[i]] %>% 
+    as.data.frame() %>% 
+    pivot_longer(! Gene_Set, names_to = "CellLine", 
+               values_to = "ssGSEA_Score") %>%
+    mutate(collection = i) %>% 
+    separate(Gene_Set, into = c("MR", "treatment_time"), sep = "_", remove = F,
+             extra = "merge") %>% 
+    select(Gene_Set, ssGSEA_Score, CellLine, MR, treatment_time) %>% 
+    mutate_at(vars(Gene_Set, CellLine, MR, treatment_time), factor) %>% 
+    mutate_at(vars(ssGSEA_Score), as.numeric)  
+
+}
+end <- Sys.time()
+end - start
+#Time difference of 0.07939005 secs
+
+stopCluster(cl)
+rm(cl)
+
+head(gsva.data.all)
+
+#Read in auc data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/",
+            sep = "/"))
+gdsc.drug <- fread(file = "gdsc2_drug_ic50_auc_v4.txt", sep = "\t", 
+                  header = T,
+            quote = "")
+
+head(gdsc.drug)
+
+#Get AUC data and put into matrix for imputation
+gdsc.auc <- gdsc.drug %>%
+  as.data.frame() %>% 
+  select(CellLine, Drug, AUC) %>% 
+  pivot_wider(names_from = "CellLine", values_from = "AUC") %>% 
+  column_to_rownames(var = "Drug") %>% 
+  as.matrix() 
+
+head(gdsc.auc)[,1:5]
+
+#Read in AUC knn imputation data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/",
+            sep = "/"))
+gdsc2.knn.data <- fread(file = "gdsc2_AUC_knn.Imputation_dataframe.txt", 
+                        sep = "\t", header = T, quote = "")
+head(gdsc2.knn.data)[,1:5]
+
+#Transform into longFormat
+gdsc2.knn.data1 <- gdsc2.knn.data %>% 
+  as.data.frame() %>%
+  pivot_longer(!CellLine, names_to = "Drug", values_to = "AUC")
+
+head(gdsc2.knn.data1)
+
+#Add drug and cell line info
+tmp <- gdsc.drug %>% 
+  select(CellLine, Tissue, Tissue_SubType, TCGA_Class) %>% 
+  unique()
+
+tmp1 <- gdsc.drug %>% 
+  select(Drug, PUTATIVE_TARGET, PATHWAY_NAME) %>% 
+  unique()
+
+#Merge exp, auc data, drug info
+gdsc2_expr_auc <- gsva.data.all %>% 
+  left_join(gdsc2.knn.data1, by = "CellLine", relationship = "many-to-many") %>% 
+  left_join(tmp, by = "CellLine") %>% 
+  left_join(tmp1, by = "Drug") %>% 
+  select(treatment_time, Gene_Set, MR, ssGSEA_Score, CellLine, Tissue, Tissue_SubType,
+         TCGA_Class, Drug, AUC, everything())
+
+head(gdsc2_expr_auc)
+
+.f = function() {
+#Save scores and auc data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+fwrite(gdsc2_expr_auc, file = paste0("gdsc2_AUC.data_ssGSEA_scores_ALL_MR_",
+                                   "regulons_LongFormat.txt"),
+       sep = "\t", row.names = F, col.names = T, quote = F)
+
+#Read in score and auc data (SMARCD3 regulon)
+gdsc2_expr_auc <- fread( file = paste0("gdsc2_AUC.data_ssGSEA_scores_ALL_MR_", 
+                                   "regulons_LongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+}
+```
+```{r}
+#IDENTIFY MR-INVERTER ANTI-CANCER DRUGS ANALYSIS USING GDSC DATASET AND 
+## SMARCD3 REGULON PHENOTYPE
+
+#Read in score and auc data (SMARCD3 regulon)
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+gdsc2_expr_auc <- fread( file = paste0("gdsc2_AUC.data_ssGSEA_scores_ALL_MR_",
+                                   "regulons_LongFormat.txt"),
+       sep = "\t", header = T, quote = "", na.strings = c("", "NA"))
+
+#Perform correlation
+names <- gdsc2_expr_auc %>% 
+  pull(Drug) %>% 
+  unique() %>% 
+  as.character() %>% 
+  na.omit()
+
+d.list <- list()
+set.seed(1122)
+system.time(
+for (i in names ) {
+  print(i)
+  tmp.d1 <- gdsc2_expr_auc %>% 
+    filter(Drug == i)
+  d.list[[i]] <- cor.test(tmp.d1$ssGSEA_Score, tmp.d1$AUC,
+                     method = "pearson")
+}
+) 
+#elapsed time = 2.117 seconds
+
+#Extract pearson correlation results
+gdsc2_corTest <- list()
+
+#For loop
+system.time(
+
+for (i in names) {
+  print(i)
+  tmp <- d.list[[i]]
+  
+  gdsc2_corTest[[i]] <- data.frame("Pearson_cor" = tmp$estimate,
+                            "pvalue" = tmp$p.value,
+                            "t" = tmp$statistic,
+                            "df" = tmp$parameter,
+                            "method" = tmp$method,
+                            "alternative" = tmp$alternative)
+}
+)
+#Elapsed time = 0.127 seconds
+
+#Merge
+gdsc2_corTest_df <- ldply(gdsc2_corTest) %>% 
+  rename("Drug" = ".id") %>%
+  add_column(fdr = p.adjust(.$pvalue), .before = "pvalue") %>% 
+  arrange(Pearson_cor)
+
+head(gdsc2_corTest_df)
+
+.f = function() {
+#Save
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            sep = "/"))
+fwrite(gdsc2_corTest_df, file = paste0("gdsc2_auc_COH069.everSamples.ALL.MRs.",
+                                       "ssGSEA.Scores_Pearson_correlations.txt"),
+     sep = "\t", row.names = F, col.names = T, quote = F)
+
+gdsc2_corTest_df <- fread(file = paste0("gdsc2_auc_COH069.everSamples.ALL.MRs.",
+                                       "ssGSEA.Scores_Pearson_correlations.txt"),
+     sep = "\t", header = T, quote = "")
+head(gdsc2_corTest_df)
+}
+
+#Filter for pvalue
+gdsc2_corTest_df1 <- gdsc2_corTest_df %>% 
+  filter(fdr <= 0.05)
+
+#Plot
+#library(viridis)
+
+#Top pearson correlations
+tx <- gdsc2_corTest_df1 %>%
+  #filter(Pearson_cor <= 0) %>% 
+  #filter(Pearson_cor >= 0) %>% 
+  #arrange(fdr) %>%
+  arrange(Pearson_cor) %>% 
+  #slice_head(n = 24) %>% 
+  pull(Drug) %>% 
+  as.character()
+
+#tx <- "Rapamycin"
+
+tmp.gg <- gdsc2_expr_auc %>% 
+  filter(Gene_Set %in% gs_keep[1],
+  #filter(Gene_Set %in% gs_keep[2],
+         Drug == tx[8])
+         #Drug %in% tx) 
+
+tmp.gg %>% 
+  #filter(Tissue == "breast") %>% 
+  filter(Drug == tx) %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  geom_point(mapping = aes(color = Tissue), 
+             size = 2, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  #facet_wrap(~Drug) +
+  facet_wrap_paginate(~Drug, ncol = 4, nrow = 3, page = 2) +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1)) +
+  guides(color = "none")
+
+
+#Plot/save
+x <- nrow(gdsc2_corTest_df1)/12
+x <- round(x, 0)
+x <- x+1
+
+#Top pearson correlations
+tx <- gdsc2_corTest_df1 %>%
+  #filter(Pearson_cor <= 0) %>% 
+  #filter(Pearson_cor >= 0) %>% 
+  #arrange(fdr) %>%
+  arrange(Pearson_cor) %>% 
+  #slice_head(n = 24) %>% 
+  pull(Drug) %>% 
+  as.character()
+
+tmp.gg <- gdsc2_expr_auc %>% 
+  #filter(Gene_Set %in% gs_keep[1],
+  filter(Gene_Set %in% gs_keep[2],
+         #Drug == tx[8])
+         Drug %in% tx) 
+
+for (i in 1:x) {
+  print(i)
+  
+  tmp.gg %>% 
+  #filter(Tissue == "breast") %>% 
+  ggplot(mapping = aes(x = AUC, y = ssGSEA_Score)) +
+  geom_point(mapping = aes(color = Tissue), 
+             size = 2, show.legend = T) +
+  #geom_label_repel(mapping = aes(label = CellLine)) +
+  theme_classic() +
+  #scale_color_viridis(option = "D") +
+  #labs(title = unique(tmp.gg$Drug)) +
+  #facet_wrap(~Drug) +
+  facet_wrap_paginate(~Drug, ncol = 4, nrow = 3, page = i) +
+  theme(axis.text.x = element_text(size = 12, face = "bold", 
+                                   angle = 25, hjust = 1)) #+
+  #guides(color = "none")
+  
+  #ggsave(filename = paste0(i, "_gdsc2.AUC_ALL_MRs.regulons.preTx.tiff"), device = "tiff", 
+  ggsave(filename = paste0(i, "_gdsc2.AUC_ALL_MRs.regulons.postTx.tiff"), device = "tiff", 
+       path = paste0(dir, "aracne_viper_results/mr_inverter_drug_analysis/",
+                     #"gdsc_data/figures_gdsc2.AUC_ALL.MRs.regulons.preTx"),
+                     "gdsc_data/figures_gdsc2.AUC_ALL.MRs.regulons.postTx"),
+                    units = "in", width = 14, height = 10, dpi = 300)
+}
+```
+
+
+
+```{r}
+#How many cell lines have both expression/ssGSEA data and auc data?
+tmp1 <- gsva.data.all %>% 
+  pull(CellLine) %>% 
+  as.character() %>% 
+  unique()
+
+tmp2 <- gdsc2.knn.data1 %>% 
+  pull(CellLine) %>% 
+  as.character() %>% 
+  unique()
+
+#Get cell lines in common
+tmp3 <- c(tmp1, tmp2) %>% 
+  as.data.frame() %>% 
+  rename("CellLine" = ".") %>% 
+  group_by(CellLine) %>% 
+  summarise(count = n()) %>% 
+  filter(count >=2) %>% 
+  ungroup()
+#911 cell lines have both expression/ssGSEA data and AUC
+
+#Which cell lines are unique to expression data/ssGSEA data? 
+tmp1 <- gsva.data.all %>% 
+  filter(!CellLine %in% tmp3$CellLine) %>% 
+  select(CellLine) %>% 
+  unique()
+#107 cell lines unique to expression data/ssGSEA data 
+##(not in drug sensitivity data)
+
+#What are cell origins? (Cell lines not in drug sensitivity data)
+tmp3 <- fread(file = "gdsc_Cell_Lines_Details.txt", sep = "\t",
+              header = T, quote = "")
+
+c.tmp <- tmp3 %>% 
+  select(CellLine, GDSC.Tissue.descriptor.1, GDSC.Tissue.descriptor.2, 
+         `Cancer.Type.(matching.TCGA.label)`) %>% 
+  filter(CellLine %in% tmp1$CellLine) %>% 
+  unique() %>% 
+  left_join(tmp1, by = "CellLine")
+
+table(c.tmp$GDSC.Tissue.descriptor.2)
+
+
+#Which cell lines are unique to drug sensitivity data? 
+tmp1 <- gdsc.drug %>% 
+  filter(!CellLine %in% tmp3$CellLine) %>% 
+  select(CellLine) %>% 
+  unique()
+#58 cell lines unique to drug sensitivity data
+##(not in expression/ssGSEA data)
+
+#What are these cell origins? (Cell lines that do not have expression data)
+c.tmp <- gdsc.drug %>% 
+  select(CellLine, Tissue, Tissue_SubType, TCGA_Class) %>% 
+  filter(CellLine %in% tmp1$CellLine) %>% 
+  unique() %>% 
+  left_join(tmp1, by = "CellLine")
+
+table(c.tmp$Tissue_SubType)
+
+
+```
+```{r}
+#Read in normalized and tidy'd gdsc2 data
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "gdsc2_expressionData/",sep = "/"))
+
+gdsc2.expr2 <- fread(file = "gdsc2_exprs_rma.Normalized_processed.txt",
+       sep = "\t", header = T, quote = "")
+
+tmp.bc <- gdsc.drug %>% 
+  filter(Tissue == "breast") %>% 
+  pull(CellLine) %>% 
+  as.character() %>% 
+  unique()
+
+tmp1 <- gdsc2.expr2 %>% 
+  as.data.frame() %>% 
+  filter(Gene_Symbol == "SMARCD3") %>% 
+  pivot_longer(!Gene_Symbol, names_to = "CellLine", values_to = "rma_expr") %>% 
+  filter(CellLine %in% tmp.bc)
+
+tmp1 %>% 
+  filter(CellLine %in% tmp.bc[1:5]) %>% 
+  ggplot(mapping = aes(x = CellLine, y = rma_expr)) +
+    geom_point()
+    
+    
+```
+
+```{r}
+#COMPARE DRUGS AND CELL LINES BETWEEN GDSC1 AND GDSC2 DATA SETS
+
+#Compare drugs in each data set
+
+#Read in GDSC1 data
+setwd(dir = "~/e2r_research/cellLine_screens")
+list.files()
+
+gdsc.exp <- fread(file = "gdsc_full.txt", sep = "\t", 
+                   header = T, quote = "")
+head(gdsc.exp)[,1:5]
+
+gdsc.meta <- fread(file = "GDSC_treatment_metadata.txt", sep = "\t", 
+                   header = T, quote = "")
+
+#Compare drugs in gdsc1 vs gdsc2
+tmp1 <- gdsc.meta %>% pull(DRUG_NAME) %>% as.character() %>% unique()
+#GDSC2 HAS 190 DRUGS
+
+
+#Read in GDSC2 data 
+setwd(paste(dir, "aracne_viper_results/mr_inverter_drug_analysis/gdsc_data/", 
+            "ssGSEA/",sep = "/"))
+list.files()
+gsva.data.all3 <- fread( file = paste0("GDSC2_AUC.data_ssGSEA_scores_SMARCD3_", 
+                                   "regulon_LongFormat.txt"),
+       sep = "\t", header = T, quote = "")
+
+tmp2 <- gsva.data.all3 %>% pull(DRUG_NAME) %>% as.character() %>% unique()
+#GDSC1 HAS 295 DRUGS
+
+all(tmp2 %in% tmp1)
+
+tmp3 <- c(tmp1, tmp2) %>% 
+  as.data.frame() %>% 
+  rename("drug" = ".") %>% 
+  group_by(drug) %>% 
+  summarise(count = n())
+  
+tmp1.1 <- tmp1 %>% 
+  as.data.frame() %>% 
+  rename("drug" = ".")
+
+tmp2.1 <- tmp2 %>% 
+  as.data.frame() %>% 
+  rename("drug" = ".")
+
+#How many overlap?
+
+#How many drugs in gdsc1 are in gdsc2?
+tmp1.2 <- tmp1.1 %>% 
+  filter(drug %in% tmp2.1$drug)
+#183
+
+#How many drugs in gdsc2 are in gdsc1?
+tmp2.2 <- tmp2.1 %>% 
+  filter(drug %in% tmp1.1$drug)
+#183
+
+#GDSC1 AND GDSC2 SHARE 183 DRUGS
+
+
+#WHICH ARE MISSING
+
+#Drugs in gdsc1(tmp1.1) that are missing in gdsc2(tmp2.1)?
+tmp1.3 <- tmp1.1 %>% 
+  filter(!drug %in% tmp2.1$drug)
+dim(tmp1.3)
+tmp1.3
+#7 drugs
+
+#Drugs in gdsc2(tmp2.1) that are missing in gdsc1(tmp1.1)?
+tmp2.3 <- tmp2.1 %>% 
+  filter(!drug %in% tmp1.1$drug)
+dim(tmp2.3)
+tmp2.3
+#112 drugs
+
+
+
+
+#Compare cell lines
+
+
+tmp1 <- gdsc.exp %>% pull(CellLine) %>% as.character() %>% unique()
+#GDSC2 HAS 1084 CellLines
+
+
+#Read in GDSC2 data 
+
+
+tmp2 <- gsva.data.all3 %>% pull(CellLine) %>% as.character() %>% unique()
+#GDSC1 HAS 911 CellLines
+
+all(tmp2 %in% tmp1)
+
+tmp3 <- c(tmp1, tmp2) %>% 
+  as.data.frame() %>% 
+  rename("CellLine" = ".") %>% 
+  group_by(CellLine) %>% 
+  summarise(count = n())
+  
+tmp1.1 <- tmp1 %>% 
+  as.data.frame() %>% 
+  rename("CellLine" = ".")
+
+tmp2.1 <- tmp2 %>% 
+  as.data.frame() %>% 
+  rename("CellLine" = ".")
+
+#How many overlap?
+
+#How many drugs in gdsc1 are in gdsc2?
+tmp1.2 <- tmp1.1 %>% 
+  filter(CellLine %in% tmp2.1$CellLine)
+#693
+
+#How many drugs in gdsc2 are in gdsc1?
+tmp2.2 <- tmp2.1 %>% 
+  filter(CellLine %in% tmp1.1$CellLine)
+#693
+
+#GDSC1 AND GDSC2 SHARE 183 DRUGS
+
+
+#WHICH ARE MISSING
+
+#CellLine in gdsc1(tmp1.1) that are missing in gdsc2(tmp2.1)?
+tmp1.3 <- tmp1.1 %>% 
+  filter(!CellLine %in% tmp2.1$CellLine)
+dim(tmp1.3)
+tmp1.3
+#391 drugs
+
+#CellLine in gdsc2(tmp2.1) that are missing in gdsc1(tmp1.1)?
+tmp2.3 <- tmp2.1 %>% 
+  filter(!CellLine %in% tmp1.1$CellLine)
+dim(tmp2.3)
+tmp2.3
+#218 drugs
+
+
+#What type of cell lines are missing in each data set
+
+```
+
